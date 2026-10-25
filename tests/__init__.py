@@ -1,0 +1,1 @@
+"""EquiSight test suite."""

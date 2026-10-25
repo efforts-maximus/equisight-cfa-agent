@@ -1,0 +1,44 @@
+fsa_forensic_task:
+  description: >
+    Analyze profitability, 5-Way DuPont decomposition, Working Capital Cash Conversion Cycle,
+    Altman Z-Score, and forensic earnings quality anomalies for {ticker}.
+    Cross-reference accounting figures strictly with audited financial data.
+  expected_output: >
+    A rigorous forensic accounting briefing detailing margins, DuPont ROE breakdown,
+    cash conversion cycle dynamics, Altman solvency zone classification, and detected forensic anomalies.
+  agent: fsa_forensic_analyst
+
+bull_thesis_task:
+  description: >
+    Construct 3 to 5 grounded upside catalysts, secular growth drivers, and moat advantages for {ticker}.
+    Rigorously support every argument with explicit [FILING-CHUNK-X] citations from the MD&A disclosures.
+  expected_output: >
+    A structured buy-side investment thesis detailing upside drivers with mandatory [FILING-CHUNK-X] citations.
+  agent: bull_equity_researcher
+
+bear_thesis_task:
+  description: >
+    Construct 3 to 5 grounded downside risks, margin compression headwinds, and structural competitive threats
+    for {ticker}. Rigorously support every critique with explicit [FILING-CHUNK-X] citations from disclosures.
+  expected_output: >
+    A structured short-seller risk assessment detailing downside vulnerabilities with mandatory [FILING-CHUNK-X] citations.
+  agent: bear_short_seller
+
+synthesize_scenarios_and_report_task:
+  description: >
+    Synthesize the dialectical Bull vs. Bear debate into bounded Pydantic DCF scenario drivers (Bear, Base, Bull)
+    for {ticker} enforcing probability conservation (sum to 1.0) and monotonic ordering.
+    Draft the comprehensive 6-section 2027 CFA Level 1 Initiating Coverage research report embedding
+    exact deterministic engine figures for Current Price, Target Price, WACC, and DuPont ROE.
+  expected_output: >
+    The validated DCFScenarioAssumptions parameters and complete 6-section CFA Initiating Coverage report markdown.
+  agent: lead_valuation_pm
+
+audit_and_repair_task:
+  description: >
+    Audit the generated research report for {ticker} against deterministic ground-truth engine metrics.
+    Verify 5-Way DuPont exactness, CCC identity, DCF monotonicity, EV-to-Equity balance sheet bridge,
+    mandatory CFA section completeness, and numerical faithfulness. Repair any flagged discrepancies.
+  expected_output: >
+    Audited Initiating Coverage report markdown with 100% numerical faithfulness and zero flagged discrepancies.
+  agent: audit_compliance_critic
