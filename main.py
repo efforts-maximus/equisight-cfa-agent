@@ -23,7 +23,14 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-from src.agents.research_flow import EquiSightResearchFlow
+import dotenv
+
+# Load environment variables with override
+dotenv.load_dotenv(override=True)
+
+from src.agents.research_flow import EquiSightResearchFlow, LLMExecutionError
+from src.data.market_gateway import DataUnavailableError, format_market_cap
+from src.data.ticker_resolver import resolve_ticker_query
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
 logger = logging.getLogger("equisight_cli")
@@ -54,12 +61,19 @@ def print_executive_summary(flow_state: Any) -> None:
     print("\n" + border)
     print(f"  EQUISIGHT CFA RESEARCH: {snapshot.company_name} ({snapshot.ticker})")
     print(f"  Sector: {snapshot.sector} | Industry: {snapshot.industry} | Units: {snapshot.unit_label}")
+    print(f"  Data Source: {snapshot.data_source} | Execution Mode: {flow_state.mode.upper()}")
+    if flow_state.mode == "llm" and getattr(flow_state, "llm_model_used", None):
+        print(f"  LLM Model: {flow_state.llm_model_used} | Synthesis Latency: {flow_state.llm_latency_ms:.1f}ms")
     print(border)
 
     # 1. Initiating Coverage & Valuation
+    formatted_mc = format_market_cap(snapshot.market_cap, cur)
+    formatted_ev = format_market_cap(snapshot.enterprise_value, cur)
     print(f"  RECOMMENDATION:          {val.recommendation}")
     print(f"  Current Market Price:    {curr_sym} {snapshot.current_price:,.2f}")
     print(f"  12M Target Price:        {curr_sym} {val.probability_weighted_intrinsic_value:,.2f} ({val.implied_upside_pct * 100:+.2f}%)")
+    print(f"  Market Cap:              {formatted_mc} ({curr_sym} {snapshot.market_cap:,.2f})")
+    print(f"  Enterprise Value:        {formatted_ev} ({curr_sym} {snapshot.enterprise_value:,.2f})")
     print(f"  52-Week Range:           {curr_sym} {snapshot.low_52week:,.2f} - {curr_sym} {snapshot.high_52week:,.2f}")
     print(divider)
 
@@ -132,6 +146,8 @@ def export_artifacts(flow_state: Any, output_dir: Path) -> tuple[Path, Path]:
         "mode": flow_state.mode,
         "status": flow_state.status,
         "repair_attempts": flow_state.repair_attempts,
+        "llm_model_used": getattr(flow_state, "llm_model_used", ""),
+        "llm_latency_ms": getattr(flow_state, "llm_latency_ms", 0.0),
         "snapshot": flow_state.snapshot.model_dump() if flow_state.snapshot else None,
         "fsa_summary": flow_state.fsa_summary.model_dump() if flow_state.fsa_summary else None,
         "quant_summary": flow_state.quant_summary.model_dump() if flow_state.quant_summary else None,
@@ -185,20 +201,41 @@ def build_parser() -> argparse.ArgumentParser:
 
 def run_cli(args: argparse.Namespace) -> int:
     """Executes the research flow and handles artifact export."""
-    print(f"\n[*] Initializing EquiSight Research Flow for '{args.ticker}' in '{args.mode}' mode...")
+    raw_query = args.ticker.strip() if args.ticker else ""
+    try:
+        resolved_ticker = resolve_ticker_query(raw_query)
+        if resolved_ticker != raw_query:
+            print(f"[*] Resolved query '{raw_query}' -> '{resolved_ticker}'")
+    except DataUnavailableError as due:
+        print(f"[!] Data Unavailable Error: {due}", file=sys.stderr)
+        return 1
+    except Exception:
+        resolved_ticker = raw_query
+
+    use_live_data = True
+    print(f"\n[*] Initializing EquiSight Research Flow for '{resolved_ticker}' in '{args.mode}' mode (Live Market Data Default)...")
     flow = EquiSightResearchFlow()
 
     try:
         flow.kickoff(
             inputs={
-                "ticker": args.ticker,
+                "ticker": resolved_ticker,
                 "mode": args.mode,
-                "use_live": args.use_live_data,
+                "use_live": use_live_data,
             }
         )
+    except DataUnavailableError as due:
+        print(f"[!] Data Unavailable Error: {due}", file=sys.stderr)
+        return 1
+    except LLMExecutionError as lee:
+        print(f"[!] LLM Execution Error: {lee}", file=sys.stderr)
+        return 1
     except Exception as exc:
         print(f"[!] Pipeline execution failed with fatal error: {exc}", file=sys.stderr)
         return 1
+
+    if flow.state.mode == "llm" and getattr(flow.state, "llm_model_used", None):
+        print(f"[*] Groq LLM Synthesis: model={flow.state.llm_model_used}, latency={flow.state.llm_latency_ms:.1f}ms")
 
     # Render terminal executive summary
     print_executive_summary(flow.state)

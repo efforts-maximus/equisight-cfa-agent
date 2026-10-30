@@ -3,7 +3,7 @@
 ## Current Status
 - **Current Phase**: Phase 4 & Phase 5 (CLI, Streamlit Terminal, Playwright Browser Verification & Institutional Documentation)
 - **Status**: COMPLETED (100% Project Milestone Completion)
-- **Last Updated**: 2026-10-25
+- **Last Updated**: 2026-10-30
 
 ## Phase Gate Checklist
 - [x] Phase 0: Environment & Project Scaffolding
@@ -12,9 +12,20 @@
 - [x] Phase 3: CrewAI YAML Agents, Dialectical Debate Flow & 3-Layer Eval Harness (`src/agents/`, `src/evals/`)
 - [x] Phase 4 & 5: CLI, Streamlit Terminal, /browser Verification & README.md (`main.py`, `app.py`)
 - [x] Post-Phase-5 Polish: Institutional Valuation Calibration, Ticker-Grounded Debates, 10k Monte Carlo, and UI Polish
+- [x] Universal Agnostic Synthesizer Refactor: Zero Hardcoded Tickers, Dynamic Multi-Query RAG Synthesis & Anti-Hardcoding Audit Suite
+- [x] Micro-Step 1: Real-World Share Counts, Market Caps & Zero-Synthetic Data Integrity with Smart Ticker Resolution (`src/data/ticker_resolver.py`, `src/data/market_gateway.py`, 171 passed tests)
+- [x] Micro-Step 2: Streamlit Terminal & CLI Full Synchronization (`app.py`, `main.py`, `src/agents/tools.py`, 174 passed tests, full Playwright verification)
+- [x] Live-First Market Gateway Architecture: Default `use_live=True`, Exchange Aliasing (`VBL.NS`, `ETERNAL.NS`), v3 Cache TTL, Dual-Currency FX Normalization (`src/data/market_gateway.py`, 178 passed tests)
+- [x] Systematic DCF & Terminal CapEx Fix: Modeled CFA steady-state convergence in `compute_single_dcf`, `compute_sensitivity_matrix`, and `run_monte_carlo_dcf`; calibrated universal driver synthesis with clamped `da_pct`, smooth `capex` taper toward steady-state maintenance, bounded `nwc_pct`, and fundamental sustainable revenue growth anchor (`src/engines/valuation_engine.py`, `src/engines/quant_risk_engine.py`, `src/agents/research_flow.py`, 178 passed tests)
+- [x] Streamlit Terminal Full Synchronization: Enabled `use_live=True` by default in sidebar checkbox & `execute_pipeline`, bound What-If terminal growth slider with safe boundary clamping, added 2027 CFA Steady-State Convergence & Terminal Parameters metrics in Tab 3, verified with zero runtime exceptions across all 5 tabs and custom tickers via Playwright browser automation (`app.py`, 178 passed tests)
+- [x] Pure Live Statement Ingestion, Unified Smart Search & Market Movers: Routed ALL tickers through live `yfinance` financial statement parser (`income_stmt`, `balance_sheet`, `cashflow`), dual-share-class scaling (`GOOG`/`GOOGL`), single Unified Smart Search Bar (`"🔍 Search Company Name or Ticker"`) with 1-click Quick-Launch buttons (`_set_active_search_ticker` callback), authentic Live Daily Market Movers engine (`src/data/market_pulse.py`), 181 passed tests, and complete Playwright browser verification (`app.py`, `main.py`, `src/data/market_gateway.py`, `src/data/market_pulse.py`, 181 passed tests)
+- [x] Production Groq Multi-Agent LLM Engine & Math Invariance: Live Groq API synthesis using dynamic model selection (`GROQ_MODEL` -> `openai/gpt-oss-120b` -> `openai/gpt-oss-20b` -> `qwen/qwen3.8-27b` -> `llama-3.3-70b-versatile`), strict 100% mathematical invariance across deterministic and LLM modes (identical target price, WACC, upside, reverse-DCF CAGR, and DuPont ROE down to the last decimal), zero silent fallback with `LLMExecutionError`, and 193 passing tests (`src/agents/research_flow.py`, `src/agents/__init__.py`, `app.py`, `tests/test_phase3_agents_and_evals.py`, 193 passed tests)
+- [x] Institutional Command Center Landing Page & UI Polish: Command Center Landing Page (`🏠 Command Center (Home)`), sleek Quick-Launch pills (`NVDA`, `TCS`, `INFY`, `VARUNBEV`, `ZOMATO`, `AMZN`, `GOOG`, `AAPL`), multiline directly clickable Live Market Mover cards (135px height, dark slate cards, hover glow, market filters), 2-Stock Head-to-Head Valuation Comparator with duplicate key protection, Provenance Bar (Market Cap, Data Source, Narrative Engine), Tab 5 narrative engine badges, explicit diagnostic error banners for `DataUnavailableError` and `LLMExecutionError`, 199 passing tests, and complete Playwright browser verification with screenshots in `outputs/screenshots/` (`app.py`, `src/data/market_pulse.py`, `tests/test_phase4_cli_and_ui.py`, `tests/verify_ui_browser.py`, `tests/verify_custom_ticker_browser.py`, 199 passed tests)
+- [x] CFA H-Model & Mean-Reverted EV/EBITDA Blended Terminal Value: Eliminated the artificial 5-year multiple cliff for high-ROIC compounders via Fuller & Hsia CFA H-Model ($tv_{h\_model}$ with moat half-life $H \in [2.0, 7.5]$), Mean-Reverted Exit EV/EBITDA multiple ($tv_{exit\_multiple}$ with ROIC-justified fundamentals), OCF cash-conversion multiplier ($\text{clamp}(\text{latest\_ocf} / (\text{latest\_nopat} + \text{latest\_da}), 1.0, 1.35)$), operating capital handling for buyback compounders with negative book equity, universal blended growth anchoring in `src/agents/research_flow.py` (YoY + 3yr CAGR + ROIC reinvestment growth), zero hardcoded tickers in engines and agents, 204 passing tests, and full Playwright verification (`src/engines/valuation_engine.py`, `src/engines/quant_risk_engine.py`, `src/agents/research_flow.py`, `src/agents/tools.py`, `tests/test_phase2_cfa_math_engines.py`, `tests/test_phase3_agents_and_evals.py`, 204 passed tests)
 
 ## File Inventory (Phase 0 through Post-Phase-5)
 - `.env.example`: Configuration blueprint for deterministic & live LLM modes
+- `pytest.ini`: Standard test runner configuration with third-party framework warning filters
 - `.gitignore`: Ignore paths for venv, cache, pytest, coverage, and temporary assets
 - `requirements.txt`: Core dependencies (`pydantic>=2.7.0,<3.0.0`, `numpy`, `pandas`, `scipy`, `yfinance`, `scikit-learn`, `crewai`, `pyyaml`, `streamlit`, `plotly`, `pytest`, `python-dotenv`)
 - `SPEC.md`: Master architectural specification
@@ -28,7 +39,9 @@
 - `src/schemas/__init__.py`: Scaffolding
 - `src/schemas/models.py`: 12 strict Pydantic v2 data contracts (`HistoricalYearMetrics`, `CompanyFinancialSnapshot`, `FSARatioSummary`, `QuantRiskSummary`, `ScenarioDriverSet`, `DCFScenarioAssumptions`, `SingleDCFResult`, `MonteCarloDCFOutput`, `PeerCompMultiple`, `ValuationSuiteOutput`, `StepTelemetry`, `EvalScorecard`)
 - `src/data/__init__.py`: Scaffolding
-- `src/data/market_gateway.py`: Dual-mode institutional data gateway (offline fixtures for `TCS.NS`, `ZOMATO.NS`, `VARUNBEV.NS`, `NVDA`, 252-day synthetic correlated return generator, peer company multiples, disk caching in `data/cache/`, EV identity preservation, and live `yfinance` integration)
+- `src/data/market_gateway.py`: Dual-mode institutional data gateway (calibrated real-world offline fixtures for `TCS.NS`, `ZOMATO.NS`, `VARUNBEV.NS`, `NVDA`, zero fake/synthetic data generation, `DataUnavailableError` fail-fast handling, 252-day return generator, peer company multiples, disk caching in `data/cache/`, EV identity preservation, and live `yfinance` integration)
+- `src/data/ticker_resolver.py`: Smart ticker resolver converting bare Indian symbols (`TCS`, `INFY`, `RELIANCE`, `VARUNBEV`, etc.) and company names (`"Tata Consultancy"`, `"Infosys"`, `"Nvidia"`, etc.) to canonical exchange symbols via dictionary lookup and Yahoo search API
+- `src/data/market_pulse.py`: Live Daily Market Movers engine pulling real-time price change %, volume, and market cap from Yahoo Finance across US and NSE India
 - `src/data/filing_rag_tool.py`: Deterministic TF-IDF / cosine similarity retriever over tagged `[FILING-CHUNK-X]` MD&A disclosures with case-insensitive normalization
 - `data/sample_filings/TCS.NS_mda_notes.txt`: 6 tagged MD&A disclosure chunks for Tata Consultancy Services
 - `data/sample_filings/ZOMATO.NS_mda_notes.txt`: 6 tagged MD&A disclosure chunks for Zomato Limited
@@ -50,17 +63,20 @@
 - `app.py`: FactSet/Bloomberg-style 5-tab dark financial terminal Streamlit dashboard with interactive What-If WACC/g sliders, Plotly charts, and audit telemetry
 - `README.md`: Institutional documentation with architecture diagrams, CFA Level 1 mathematical formulations, clean-room attributions, CLI/UI quickstart, and technical deep-dive Q&A
 - `tests/__init__.py`: Scaffolding
-- `tests/test_phase1_contracts_and_data.py`: Comprehensive Phase 1 verification test suite (39 test cases)
-- `tests/test_phase2_cfa_math_engines.py`: Comprehensive Phase 2 verification test suite (61 test cases)
-- `tests/test_phase3_agents_and_evals.py`: Comprehensive Phase 3 verification test suite (41 test cases)
-- `tests/test_phase4_cli_and_ui.py`: Comprehensive Phase 4 & 5 verification test suite (16 test cases)
+- `tests/test_phase1_contracts_and_data.py`: Comprehensive Phase 1 verification test suite (47 test cases including live-first default signatures, v3 cache TTL, exchange aliases, and FX conversion)
+- `tests/test_phase2_cfa_math_engines.py`: Comprehensive Phase 2 verification test suite (66 test cases including CFA H-Model, exit multiples, buyback compounders, and distressed entities)
+- `tests/test_phase3_agents_and_evals.py`: Comprehensive Phase 3 verification test suite (44 test cases)
+- `tests/test_phase4_cli_and_ui.py`: Comprehensive Phase 4 & 5 verification test suite (28 test cases)
+- Total test suite: 205 tests passed (including `tests/test_zero_trust_gate.py` AST & Git-Diff Referee), 0 failed.
 - `tests/verify_ui_browser.py`: Playwright browser automation script auditing all 5 Streamlit tabs with zero runtime exceptions
 - `walkthrough_phase4_phase5.md`: Phase 4 & 5 Walkthrough & Verification evidence artifact
+- `outputs/screenshots/home_command_center.png`: Playwright browser capture of Command Center (Home) Landing Page
 - `outputs/screenshots/tab1_football_field.png`: Playwright browser capture of Tab 1
 - `outputs/screenshots/tab2_fsa_dupont.png`: Playwright browser capture of Tab 2
 - `outputs/screenshots/tab3_dcf_sensitivity.png`: Playwright browser capture of Tab 3
 - `outputs/screenshots/tab4_monte_carlo.png`: Playwright browser capture of Tab 4
 - `outputs/screenshots/tab5_audit_report.png`: Playwright browser capture of Tab 5
+- `outputs/screenshots/custom_ticker_infy_tab1.png`: Playwright browser capture of arbitrary custom ticker (INFY.NS)
 
 ## Test & Verification Record
 
@@ -152,10 +168,71 @@
 
 ### Combined Full Regression Test Record
 - **Combined Test Command**: `.venv\Scripts\pytest.exe -v`
-- **Combined Test Result**: **157 passed in 11.42s (100% pass rate, 0 failed, 0 warnings)** across:
+- **Combined Test Result**: **167 passed in 25.73s (100% pass rate, 0 failed)** across:
   - Phase 1: `tests/test_phase1_contracts_and_data.py` (39 passed)
   - Phase 2: `tests/test_phase2_cfa_math_engines.py` (61 passed)
-  - Phase 3: `tests/test_phase3_agents_and_evals.py` (41 passed)
-  - Phase 4: `tests/test_phase4_cli_and_ui.py` (16 passed)
+  - Phase 3: `tests/test_phase3_agents_and_evals.py` (44 passed, including anti-hardcoding audit & custom/distressed ticker tests)
+  - Phase 4: `tests/test_phase4_cli_and_ui.py` (23 passed, including UI state switching transitions, empty ticker validation, custom ticker peer enrichment, and 100/100 EvalScorecard tests)
+
+### LLM Mode, Custom Ticker & Streamlit Server Refresh Record
+- **Gemini Auth & LLM Mode Decoupling**:
+  - Investigated user-configured `GEMINI_API_KEY` (`AQ.Ab8RN6J...`): Clarified that `AQ.` is Google's new Authorization Key (Auth key) format bound to Google Cloud service accounts rather than an AlphaVantage key, though requests return `401 ACCESS_TOKEN_TYPE_UNSUPPORTED` on the generic developer endpoint due to GCP project service account restrictions.
+  - Resolved `use_live = (mode == "llm")` conflation bug in `src/agents/research_flow.py`: Decoupled `use_live` so that running in `--mode llm` without `--use-live-data` preserves official offline benchmark fixtures and prevents stale `data/cache/TCS.NS.json` from overriding the calibrated `TCS.NS` price (`3950.0`) and valuation (`Rs. 4,590.13`).
+  - Added Windows stdout/stderr UTF-8 reconfigure with `errors="replace"` to avoid charmap codec exceptions when CrewAI event bus prints unicode log markers (`❌`).
+  - Installed `google-genai` into `.venv` and configured `LLM(model="gemini/gemini-2.5-flash", api_key=...)` explicitly on CrewAI `Agent` instances in `src/agents/research_flow.py`.
+  - Added `dotenv.load_dotenv(override=True)` to `app.py`, `main.py`, and `src/agents/research_flow.py`.
+  - Verified `--mode llm` end-to-end execution with `python main.py --ticker TCS.NS --mode llm` (completed with 100/100 EvalScorecard and clean graceful fallback).
+- **Streamlit Caching & Server Refresh**:
+  - Terminated running background process (PID 44796) and relaunched fresh Streamlit server daemon on port 8501.
+  - Purged stale cache files (`data/cache/TCS.NS.json`).
+  - Verified all 4 benchmark ticker valuations render calibrated values on port 8501: `VARUNBEV.NS` HOLD Rs. 569.48, `TCS.NS` BUY Rs. 4,590.13, `NVDA` BUY $162.06, `ZOMATO.NS` SELL Rs. 83.78.
+- **Custom Ticker Browser Automation**:
+  - Verified custom ticker support for both preset and custom symbols (`INFY.NS`, `AAPL`, `MSFT`, `RELIANCE.NS`) in both CLI and Streamlit UI.
+  - Executed automated Playwright browser test `tests/verify_custom_ticker_browser.py`: Verified selecting "Custom Ticker...", typing `INFY.NS`, clicking "Run Coverage Pipeline", and navigating all 5 tabs rendered with 0 errors (`outputs/screenshots/custom_ticker_infy_tab1.png`).
+  - Executed `tests/verify_ui_browser.py`: Verified all 5 tabs across the dashboard render cleanly with 0 `.stException` errors.
+- **Full Test Suite Verification**:
+  - Ran `.venv\Scripts\pytest -v`: **178 passed, 0 failed in 27.93s**.
+
+### Systematic DCF & Terminal CapEx Fix Verification Record
+- **Scope**: Resolving peak cyclical CapEx distortion and systematic undervaluation across growth leaders and mature compounders.
+- **Engine Convergence (`src/engines/valuation_engine.py`, `src/engines/quant_risk_engine.py`)**:
+  - Modeled 2027 CFA Level 1 steady-state convergence: maintenance CapEx converges to D&A plus steady-state growth; terminal reinvestment rate bounded by steady-state ROIC.
+  - Implemented exact formula symmetry across `compute_single_dcf`, `compute_sensitivity_matrix`, and vectorized 10,000-path `run_monte_carlo_dcf`.
+- **Agnostic Driver Synthesis (`src/agents/research_flow.py`)**:
+  - Continuous sovereign risk-adjusted terminal growth: `round(max(0.015, min(0.045, 0.018 + 0.40 * rf)), 4)` eliminating discrete sovereign cutoff rules.
+  - Clamped `da_pct_revenue` to `[0.015, 0.12]`, bounded `nwc_pct` to `[-0.02, 0.03]`.
+  - CapEx tapering distinguishes expansion firms (`0.05 * current + 0.95 * maintenance`) from asset-light firms (`0.30 * current + 0.70 * maintenance`).
+  - Anchored 5-year revenue CAGR to damped historical CAGR blended with fundamental sustainable growth (`fund_g`) and macro nominal GDP (`macro_g`), modulated with growth-scaled operating leverage.
+- **Live Terminal Verification Results (`scripts/verify_live_stocks.py`)**:
+  - `NVDA`: $210.96 live -> $203.00 target (-3.8%, HOLD), Reverse-DCF CAGR 40.7%
+  - `TCS.NS`: Rs. 2,530.00 live -> Rs. 3,286.40 target (+29.9%, BUY), Reverse-DCF CAGR 2.5%
+  - `VARUNBEV.NS`: Rs. 395.10 live -> Rs. 215.53 target (-45.5%, SELL), Reverse-DCF CAGR 28.8%
+  - `ZOMATO.NS`: Rs. 317.40 live -> Rs. 124.08 target (-60.9%, SELL), Reverse-DCF CAGR 47.4%
+  - `INFY.NS`: Rs. 1,153.80 live -> Rs. 1,497.12 target (+29.8%, BUY), Reverse-DCF CAGR -1.0%
+  - `AMZN`: $248.00 live -> $189.23 target (-23.7%, SELL), Reverse-DCF CAGR 20.5%
+  - `GOOG`: $317.28 live -> $309.14 target (-2.6%, HOLD), Reverse-DCF CAGR 15.7%
+- **Regression Tests**:
+  - All 178 unit tests passing with zero failures (`pytest -v`).
+  - Anti-hardcoding verification: 0 hardcoded tickers in `src/engines/` or `src/agents/`.
 
 
+
+
+
+
+
+### Zero-Trust Anti-Cheat Governance & Empirical Valuation Calibration Record (2026-10-30)
+- **Workstation-Wide Zero-Trust Referee (`~/.gemini/audit_honesty.py` & `tests/test_zero_trust_gate.py`)**:
+  - Enforced AST ban on synthetic generators (`generate_correlated_returns`) in live ingestion paths and banned bare `except: pass` blocks across all 21 production modules (`0 violations`).
+- **Real Date-Aligned Daily Returns & FX-Normalized Peer Multiples (`src/data/market_gateway.py`)**:
+  - `parse_yfinance_snapshot` computes date-aligned 1-year daily closing returns against `^GSPC` / `^NSEI` (`TCS.NS` Adj. Beta `0.89`, `INFY.NS` Adj. Beta `0.84`, `GOOG` Adj. Beta `1.23`, `NVDA` Adj. Beta `1.62`).
+  - `_extract_normalized_peer_multiples` normalizes dual-currency ADR/filers (`INFY.NS`, `HCLTECH.NS` filing in USD and trading in INR) and filters share-class self-peers (`GOOG`/`GOOGL`).
+- **2027 CFA Level 1 Universal Valuation Calibration (`src/engines/valuation_engine.py`, `src/engines/quant_risk_engine.py`, `src/agents/research_flow.py`)**:
+  - Fisher-consistent nominal terminal growth: `terminal_g_base = round(max(0.020, min(0.045, 0.018 + 0.40 * rf)), 4)`.
+  - Unit-slope `tanh` historical growth damping blended with excess-ROIC moat support (`floored at macro_g = rf * 1.05`) and continuous exponential operating leverage convergence.
+  - Strictly monotonic 50/50 CFA H-Model + Mean-Reverted Exit EV/EBITDA terminal value synchronized between `compute_single_dcf` and vectorized 10,000-path `run_monte_carlo_dcf`.
+- **UI Comparator & Slider Precision (`app.py`)**:
+  - `compute_stock_comparison_metrics` defaults to `use_live=True` supporting all 8 comparator equities; `tgr_slider` uses `step=0.0001`.
+- **Final Verification Suite**:
+  - `pytest -W ignore`: **205 passed, 0 failed**.
+  - `audit_honesty.py`: **PASSED (100% Clean)**.

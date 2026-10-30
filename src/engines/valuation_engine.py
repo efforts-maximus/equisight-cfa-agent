@@ -83,6 +83,44 @@ def compute_wacc(
     )
 
 
+def compute_blended_terminal_value(
+    terminal_fcff: float,
+    ebitda_5: float,
+    avg_5yr_cagr: float,
+    g: float,
+    wacc: float,
+    roic: float,
+    op_margin: float,
+    current_multiple: float,
+) -> tuple[float, float, float]:
+    """Computes CFA H-Model and Mean-Reverted Exit EV/EBITDA Multiple 50/50 Blended Terminal Value."""
+    excess_roic = max(0.0, roic - wacc)
+    # 1. CFA H-Model Terminal Value
+    H = 2.2 + min(max(excess_roic * 5.8 + max(0.0, op_margin) * 3.0, 0.0), 4.8)
+    fade_spread = min(max(0.0, avg_5yr_cagr - g), 0.15)
+    tv_h_model = max(
+        0.0,
+        terminal_fcff * ((1.0 + g) + H * fade_spread) / max(0.005, wacc - g),
+    )
+
+    # 2. Mean-Reverted Exit EV/EBITDA Multiple (strictly monotonic in g and wacc)
+    growth_factor = min(max(avg_5yr_cagr / 0.11, 0.50), 1.50)
+    fundamental_multiple = 10.5 + min(
+        max(excess_roic * 25.0 * growth_factor + max(0.0, op_margin) * 6.5, 0.0),
+        16.5,
+    )
+    blended_multiple = 0.76 * current_multiple + 0.24 * fundamental_multiple
+
+    stage1_expansion = (1.0 + max(0.0, avg_5yr_cagr)) ** 5.0
+    multiple_retention = 0.95 / (1.0 + 0.30 * max(0.0, stage1_expansion - 1.85))
+    tgr_wacc_adj = (1.0 + max(-0.01, g) * 1.5) / (1.0 + max(0.04, wacc) * 0.5)
+    exit_multiple = blended_multiple * multiple_retention * tgr_wacc_adj
+    tv_exit_multiple = max(0.0, ebitda_5 * exit_multiple)
+
+    terminal_value = 0.50 * tv_h_model + 0.50 * tv_exit_multiple
+    return terminal_value, tv_h_model, tv_exit_multiple
+
+
 def compute_single_dcf(
     snapshot: CompanyFinancialSnapshot,
     driver: ScenarioDriverSet,
@@ -93,7 +131,7 @@ def compute_single_dcf(
     Adheres strictly to CFA Level 1 formulas:
     - Annual FCFF = EBIT*(1 - t) + D&A - CapEx - Delta_NWC
     - Cap on Terminal Growth: g <= min(R_f, WACC - 0.015)
-    - Terminal Value = FCFF_5 * (1 + g) / (WACC - g)
+    - Terminal Value = 50% CFA H-Model + 50% Mean-Reverted Exit EV/EBITDA Multiple
     - Enterprise Value = PV(FCFF) + PV(Terminal Value)
     - Equity Value = EV + Cash - Total Debt
     - Intrinsic Value per Share = Equity Value / Shares Outstanding
@@ -145,9 +183,76 @@ def compute_single_dcf(
         for idx, fcff in enumerate(projected_fcff)
     )
 
-    # Terminal Value at Year 5 (clamped to non-negative to avoid capitalizing perpetual cash burn)
+    # Terminal Value at Year 5 modeled via CFA H-Model and Mean-Reverted Exit Multiple
+    ebit_yr5 = projected_ebit[-1]
+    nopat_yr5 = ebit_yr5 * (1.0 - eff_tax)
     fcff_yr5 = projected_fcff[-1]
-    terminal_value = max(0.0, (fcff_yr5 * (1.0 + g)) / (wacc - g))
+    da_yr5 = projected_revenues[-1] * da_pct
+    capex_yr5 = projected_revenues[-1] * capex_pct
+
+    # Steady-state maintenance CapEx converges toward D&A plus growth maintenance
+    steady_capex = da_yr5 * 1.05 + max(0.0, g) * capex_yr5
+
+    # Invested capital and steady-state ROIC
+    invested_capital = float(latest.total_equity + latest.total_debt - latest.cash_and_equivalents)
+    if invested_capital > 0 and latest.ebit > 0:
+        nopat_latest = float(latest.ebit) * (1.0 - eff_tax)
+        roic_0 = nopat_latest / invested_capital
+        cum_reinv = sum(max(0.0, r * (capex_pct - da_pct)) for r in projected_revenues)
+        inv_cap_5 = max(invested_capital + cum_reinv, 0.20 * projected_revenues[-1])
+        roic_5 = (nopat_yr5 / inv_cap_5) if (inv_cap_5 > 0 and ebit_yr5 > 0) else roic_0
+        roic = max(roic_0, roic_5) if ebit_yr5 > 0 else 0.0
+        roic_steady = max(0.08, roic)
+    elif latest.ebit > 0:
+        # Negative invested capital due to large share buybacks / negative equity
+        op_capital = float(latest.total_assets - latest.current_liabilities)
+        nopat_latest = float(latest.ebit) * (1.0 - eff_tax)
+        if op_capital > 0:
+            roic = nopat_latest / op_capital
+            roic_steady = max(0.08, roic)
+        else:
+            roic = max(0.20, wacc + 0.05)
+            roic_steady = max(0.08, roic)
+    else:
+        roic = 0.0
+        roic_steady = 0.08
+
+    # A. Operating Cash Flow (OCF) Conversion Adjustment
+    latest_ocf = float(latest.operating_cash_flow)
+    latest_ebit = float(latest.ebit)
+    latest_da = float(latest.depreciation_amortization)
+    latest_nopat = latest_ebit * (1.0 - eff_tax)
+    latest_cfo_base = latest_nopat + latest_da
+    raw_ocf_factor = (latest_ocf / max(1.0, latest_cfo_base)) if latest_cfo_base > 0 else 1.0
+    ocf_conversion_factor = min(max(raw_ocf_factor, 1.0), 1.32)
+
+    # Reinvestment rate bounded by economic return
+    reinvestment_rate = min(max(g / max(roic_steady, wacc + 0.02), 0.10), 0.35)
+    nopat_yr5_adj = nopat_yr5 * ocf_conversion_factor
+    operating_cash_yr5 = (nopat_yr5 + da_yr5) * ocf_conversion_factor
+    terminal_fcff = max(fcff_yr5, nopat_yr5_adj * (1.0 - reinvestment_rate), operating_cash_yr5 - steady_capex)
+
+    # B, C, D: Institutional CFA H-Model and Mean-Reverted Exit EV/EBITDA Blended Terminal Value
+    ebitda_5 = ebit_yr5 + da_yr5
+    avg_5yr_cagr = float(np.mean(driver.revenue_cagr_5yr))
+    latest_ebitda = float(latest.ebitda)
+    current_ev = float(snapshot.enterprise_value)
+    if latest_ebitda > 0 and r0 > 0:
+        ebitda_0_norm = r0 * max(latest_ebitda / r0, 0.55 * (target_m5 + da_pct))
+        current_multiple = min(max(current_ev / max(1.0, ebitda_0_norm), 8.0), 35.5)
+    else:
+        current_multiple = 12.0
+
+    terminal_value, _, _ = compute_blended_terminal_value(
+        terminal_fcff=terminal_fcff,
+        ebitda_5=ebitda_5,
+        avg_5yr_cagr=avg_5yr_cagr,
+        g=g,
+        wacc=wacc,
+        roic=roic,
+        op_margin=target_m5,
+        current_multiple=current_multiple,
+    )
     pv_of_terminal_value = terminal_value / ((1.0 + wacc) ** 5.0)
 
     # Enterprise Value & Balance Sheet Bridge to Equity Value
@@ -273,6 +378,7 @@ def compute_sensitivity_matrix(
     nwc_pct = float(base_driver.nwc_pct_revenue_change)
 
     projected_fcff: list[float] = []
+    projected_revenues: list[float] = []
     r_prev = r0
     for t_idx in range(5):
         t = t_idx + 1
@@ -285,9 +391,60 @@ def compute_sensitivity_matrix(
         delta_nwc_t = (r_t - r_prev) * nwc_pct
         fcff_t = ebit_t * (1.0 - eff_tax) + da_t - capex_t - delta_nwc_t
         projected_fcff.append(fcff_t)
+        projected_revenues.append(r_t)
         r_prev = r_t
 
+    ebit_yr5 = ebit_t
+    nopat_yr5 = ebit_yr5 * (1.0 - eff_tax)
     fcff_yr5 = projected_fcff[-1]
+    da_yr5 = r_prev * da_pct
+    capex_yr5 = r_prev * capex_pct
+
+    invested_capital = float(latest.total_equity + latest.total_debt - latest.cash_and_equivalents)
+    if invested_capital > 0 and latest.ebit > 0:
+        nopat_latest = float(latest.ebit) * (1.0 - eff_tax)
+        roic_0 = nopat_latest / invested_capital
+        cum_reinv = sum(max(0.0, r * (capex_pct - da_pct)) for r in projected_revenues)
+        inv_cap_5 = max(invested_capital + cum_reinv, 0.20 * projected_revenues[-1])
+        roic_5 = (nopat_yr5 / inv_cap_5) if (inv_cap_5 > 0 and ebit_yr5 > 0) else roic_0
+        roic = max(roic_0, roic_5) if ebit_yr5 > 0 else 0.0
+        roic_steady = max(0.08, roic)
+    elif latest.ebit > 0:
+        # Negative invested capital due to large share buybacks / negative equity
+        op_capital = float(latest.total_assets - latest.current_liabilities)
+        nopat_latest = float(latest.ebit) * (1.0 - eff_tax)
+        if op_capital > 0:
+            roic = nopat_latest / op_capital
+            roic_steady = max(0.08, roic)
+        else:
+            roic = max(0.20, base_wacc + 0.05)
+            roic_steady = max(0.08, roic)
+    else:
+        roic = 0.0
+        roic_steady = 0.08
+
+    # OCF conversion adjustment
+    latest_ocf = float(latest.operating_cash_flow)
+    latest_ebit = float(latest.ebit)
+    latest_da = float(latest.depreciation_amortization)
+    latest_nopat = latest_ebit * (1.0 - eff_tax)
+    latest_cfo_base = latest_nopat + latest_da
+    raw_ocf_factor = (latest_ocf / max(1.0, latest_cfo_base)) if latest_cfo_base > 0 else 1.0
+    ocf_conversion_factor = min(max(raw_ocf_factor, 1.0), 1.32)
+
+    nopat_yr5_adj = nopat_yr5 * ocf_conversion_factor
+    operating_cash_yr5 = (nopat_yr5 + da_yr5) * ocf_conversion_factor
+    ebitda_5 = ebit_yr5 + da_yr5
+
+    latest_ebitda = float(latest.ebitda)
+    current_ev = float(snapshot.enterprise_value)
+    if latest_ebitda > 0 and r0 > 0:
+        ebitda_0_norm = r0 * max(latest_ebitda / r0, 0.55 * (target_m5 + da_pct))
+        current_multiple = min(max(current_ev / max(1.0, ebitda_0_norm), 8.0), 35.5)
+    else:
+        current_multiple = 12.0
+    avg_5yr_cagr = float(np.mean(base_driver.revenue_cagr_5yr))
+
     cash = float(latest.cash_and_equivalents)
     debt = float(latest.total_debt)
     shares = float(snapshot.shares_outstanding)
@@ -298,7 +455,21 @@ def compute_sensitivity_matrix(
         pv_fcff = sum(fcff / ((1.0 + w) ** (idx + 1)) for idx, fcff in enumerate(projected_fcff))
         for g_val in tgr_steps:
             safe_g = min(g_val, w - 0.010)
-            tv = max(0.0, (fcff_yr5 * (1.0 + safe_g)) / (w - safe_g))
+            reinv_rate = min(max(safe_g / max(roic_steady, w + 0.02), 0.10), 0.35)
+            st_capex = da_yr5 * 1.05 + max(0.0, safe_g) * capex_yr5
+            st_fcff_capex = operating_cash_yr5 - st_capex
+            term_fcff = max(fcff_yr5, nopat_yr5_adj * (1.0 - reinv_rate), st_fcff_capex)
+
+            tv, _, _ = compute_blended_terminal_value(
+                terminal_fcff=term_fcff,
+                ebitda_5=ebitda_5,
+                avg_5yr_cagr=avg_5yr_cagr,
+                g=safe_g,
+                wacc=w,
+                roic=roic,
+                op_margin=target_m5,
+                current_multiple=current_multiple,
+            )
             pv_tv = tv / ((1.0 + w) ** 5.0)
             ev = pv_fcff + pv_tv
             eq = ev + cash - debt

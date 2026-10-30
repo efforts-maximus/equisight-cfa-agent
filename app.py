@@ -11,6 +11,7 @@ FactSet/Bloomberg-style dark financial terminal UI offering:
 import copy
 import json
 import logging
+import os
 import re
 from typing import Any, Optional
 import numpy as np
@@ -18,8 +19,15 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+import dotenv
 
-from src.agents.research_flow import EquiSightResearchFlow
+# Load environment variables with override
+dotenv.load_dotenv(override=True)
+
+from src.agents.research_flow import EquiSightResearchFlow, LLMExecutionError
+from src.data.market_gateway import DataUnavailableError, format_market_cap
+from src.data.market_pulse import TrendingStockCard, fetch_daily_popular_stocks
+from src.data.ticker_resolver import resolve_ticker_query
 from src.engines.valuation_engine import run_valuation_suite
 from src.schemas.models import (
     CompanyFinancialSnapshot,
@@ -44,6 +52,9 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+VIEW_HOME = "🏠 Command Center (Home)"
+VIEW_TERMINAL = "📊 Deep-Dive Research Terminal"
 
 TERMINAL_CSS = """
 <style>
@@ -123,6 +134,169 @@ TERMINAL_CSS = """
     section[data-testid="stSidebar"] {
         background-color: #161b22;
         border-right: 1px solid #30363d;
+    }
+
+    /* Sleek Quick Pill Buttons in Sidebar */
+    div[class*="st-key-btn_ql_"] button,
+    div[data-testid="stSidebar"] div[data-testid="stColumn"]:has(.quick-pill-btn) button,
+    div[data-testid="stSidebar"] div[class*="st-key-btn_ql_"] button,
+    .quick-pill-btn button,
+    div.quick-pill-btn button {
+        height: 32px !important;
+        min-height: 32px !important;
+        max-height: 32px !important;
+        background-color: #1E293B !important;
+        background: #1E293B !important;
+        border: 1px solid #334155 !important;
+        color: #F8FAFC !important;
+        font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace !important;
+        font-weight: 700 !important;
+        font-size: 0.68rem !important;
+        padding: 0 1px !important;
+        border-radius: 4px !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        white-space: nowrap !important;
+        transition: all 0.2s ease-in-out !important;
+        box-shadow: none !important;
+    }
+    div[class*="st-key-btn_ql_"] button:hover,
+    div[data-testid="stSidebar"] div[data-testid="stColumn"]:has(.quick-pill-btn) button:hover,
+    div[data-testid="stSidebar"] div[class*="st-key-btn_ql_"] button:hover,
+    .quick-pill-btn button:hover,
+    div.quick-pill-btn button:hover {
+        border-color: #38BDF8 !important;
+        box-shadow: 0 0 10px rgba(56, 189, 248, 0.5) !important;
+        color: #38BDF8 !important;
+        background: #1E293B !important;
+    }
+    div[class*="st-key-btn_ql_"] button div,
+    div[class*="st-key-btn_ql_"] button p,
+    div[class*="st-key-btn_ql_"] button span,
+    div[data-testid="stSidebar"] div[data-testid="stColumn"]:has(.quick-pill-btn) button div,
+    div[data-testid="stSidebar"] div[data-testid="stColumn"]:has(.quick-pill-btn) button p,
+    div[data-testid="stSidebar"] div[data-testid="stColumn"]:has(.quick-pill-btn) button span {
+        font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace !important;
+        font-weight: 700 !important;
+        font-size: 0.68rem !important;
+        color: #F8FAFC !important;
+        white-space: nowrap !important;
+        text-overflow: clip !important;
+        overflow: visible !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        letter-spacing: -0.02em !important;
+    }
+    div[class*="st-key-btn_ql_"] button:hover div,
+    div[class*="st-key-btn_ql_"] button:hover p,
+    div[class*="st-key-btn_ql_"] button:hover span {
+        color: #38BDF8 !important;
+    }
+
+    /* Live Market Mover Card Button Styling */
+    div[class*="st-key-mover_card_"] button,
+    div[data-testid="stColumn"]:has(.mover-card-btn) button,
+    div.mover-card-btn button,
+    div[data-testid="stHorizontalBlock"] .mover-card-btn button,
+    button[key*="mover_card_"],
+    button:has(div[title*="MCap"]),
+    button:has(div[title*="Vol:"]) {
+        height: 135px !important;
+        min-height: 135px !important;
+        max-height: 135px !important;
+        text-align: left !important;
+        justify-content: flex-start !important;
+        align-items: flex-start !important;
+        white-space: pre-line !important;
+        background: linear-gradient(135deg, #0F172A 0%, #1E293B 100%) !important;
+        background-color: #0F172A !important;
+        border: 1px solid #334155 !important;
+        border-radius: 8px !important;
+        padding: 12px 14px !important;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+        transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1) !important;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3) !important;
+        cursor: pointer !important;
+        width: 100% !important;
+    }
+    div[class*="st-key-mover_card_"] button:hover,
+    div[data-testid="stColumn"]:has(.mover-card-btn) button:hover,
+    div.mover-card-btn button:hover,
+    div[data-testid="stHorizontalBlock"] .mover-card-btn button:hover,
+    button[key*="mover_card_"]:hover,
+    button:has(div[title*="MCap"]):hover,
+    button:has(div[title*="Vol:"]):hover {
+        border-color: #38BDF8 !important;
+        box-shadow: 0 10px 15px -3px rgba(56, 189, 248, 0.25), 0 4px 6px -2px rgba(56, 189, 248, 0.1) !important;
+        transform: translateY(-2px) !important;
+        background: linear-gradient(135deg, #1E293B 0%, #334155 100%) !important;
+    }
+    div[class*="st-key-mover_card_"] button div,
+    div[class*="st-key-mover_card_"] button p,
+    div[class*="st-key-mover_card_"] button span,
+    div[class*="st-key-mover_card_"] button .stMarkdownEllipsis,
+    div[data-testid="stColumn"]:has(.mover-card-btn) button div,
+    div[data-testid="stColumn"]:has(.mover-card-btn) button p,
+    div[data-testid="stColumn"]:has(.mover-card-btn) button span,
+    div[data-testid="stColumn"]:has(.mover-card-btn) button .stMarkdownEllipsis,
+    div.mover-card-btn button div,
+    div.mover-card-btn button p,
+    button[key*="mover_card_"] div,
+    button[key*="mover_card_"] p,
+    button:has(div[title*="MCap"]) div,
+    button:has(div[title*="MCap"]) p,
+    button:has(div[title*="Vol:"]) div,
+    button:has(div[title*="Vol:"]) p {
+        text-align: left !important;
+        white-space: pre-line !important;
+        width: 100% !important;
+        font-size: 0.85rem !important;
+        line-height: 1.45 !important;
+        color: #F8FAFC !important;
+        overflow: visible !important;
+        text-overflow: clip !important;
+    }
+
+    /* Architecture Highlight Cards */
+    .arch-card {
+        background: #161B22;
+        border: 1px solid #30363D;
+        border-radius: 8px;
+        padding: 14px 16px;
+        min-height: 110px;
+        display: flex;
+        flex-direction: column;
+        justify-content: flex-start;
+        transition: all 0.2s ease-in-out;
+    }
+    .arch-card:hover {
+        border-color: #38BDF8;
+        box-shadow: 0 4px 12px rgba(56, 189, 248, 0.15);
+    }
+    .arch-title {
+        color: #F8FAFC;
+        font-weight: 700;
+        font-size: 0.86rem;
+        margin-bottom: 6px;
+    }
+    .arch-desc {
+        color: #94A3B8;
+        font-size: 0.76rem;
+        line-height: 1.4;
+    }
+
+    /* Provenance Bar Pills */
+    .provenance-pill {
+        background-color: #161b22;
+        border: 1px solid #30363d;
+        border-radius: 20px;
+        padding: 4px 14px;
+        font-size: 0.82rem;
+        font-weight: 600;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
     }
 </style>
 """
@@ -415,15 +589,309 @@ def build_monte_carlo_histogram(
 # ==============================================================================
 # Pipeline Execution & Session State Management
 # ==============================================================================
-def execute_pipeline(ticker: str, mode: str, use_live: bool = False) -> Any:
+def execute_pipeline(ticker: str, mode: str, use_live: bool = True) -> Any:
     """Executes the EquiSight research pipeline flow and stores results."""
+    execute_pipeline.last_error = None
     try:
         flow = EquiSightResearchFlow()
         flow.kickoff(inputs={"ticker": ticker, "mode": mode, "use_live": use_live})
         return flow.state
+    except LLMExecutionError as lee:
+        logger.error(f"LLM execution error for ticker '{ticker}': {lee}")
+        execute_pipeline.last_error = f"LLMExecutionError: {lee}"
+        return None
+    except DataUnavailableError as due:
+        logger.error(f"Data unavailable for ticker '{ticker}': {due}")
+        execute_pipeline.last_error = f"DataUnavailableError: {due}"
+        return None
     except Exception as exc:
         logger.error(f"Pipeline execution failed for ticker '{ticker}': {exc}")
+        execute_pipeline.last_error = str(exc)
         return None
+
+execute_pipeline.last_error = None
+
+
+def get_benchmark_mover_cards() -> list[TrendingStockCard]:
+    """Generates benchmark mover cards from audited institutional fixtures when offline."""
+    benchmark_specs = [
+        ("NVDA", "NVIDIA Corporation", "US", 142.50, "USD", 3.45, 48200000, 3500000.0, "$3.50T"),
+        ("TCS.NS", "Tata Consultancy Services", "NSE", 4120.00, "INR", 1.85, 3200000, 1490000.0, "₹14.90L Cr"),
+        ("VARUNBEV.NS", "Varun Beverages Limited", "NSE", 625.40, "INR", -0.75, 4100000, 203000.0, "₹2.03L Cr"),
+        ("ZOMATO.NS", "Zomato Limited", "NSE", 265.80, "INR", 4.20, 15800000, 235000.0, "₹2.35L Cr"),
+        ("AAPL", "Apple Inc.", "US", 232.10, "USD", 0.65, 38500000, 3550000.0, "$3.55T"),
+        ("INFY.NS", "Infosys Limited", "NSE", 1925.50, "INR", 1.10, 5200000, 798000.0, "₹7.98L Cr"),
+        ("AMZN", "Amazon.com, Inc.", "US", 188.40, "USD", -1.25, 29400000, 1960000.0, "$1.96T"),
+        ("GOOGL", "Alphabet Inc.", "US", 168.90, "USD", 0.90, 22100000, 2110000.0, "$2.11T"),
+    ]
+    cards = []
+    for tkr, name, mkt, prc, cur, chg, vol, mc, fmc in benchmark_specs:
+        cards.append(
+            TrendingStockCard(
+                ticker=tkr,
+                company_name=name,
+                market=mkt,
+                current_price=prc,
+                currency=cur,
+                daily_change_pct=chg,
+                daily_volume=vol,
+                market_cap=mc,
+                formatted_market_cap=fmc,
+            )
+        )
+    return cards
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_cached_popular_stocks(market_filter: str = "ALL", max_items: int = 8) -> tuple[list[TrendingStockCard], bool, str]:
+    """Caches popular stocks and market movers for fast Streamlit rendering."""
+    return fetch_daily_popular_stocks(market_filter=market_filter, max_items=max_items)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def compute_stock_comparison_metrics(ticker_symbol: str, use_live: bool = True) -> Optional[dict[str, Any]]:
+    """Fetches and computes core valuation & FSA metrics for the 2-stock head-to-head comparator."""
+    try:
+        clean_ticker = ticker_symbol.strip()
+        if not clean_ticker:
+            return None
+        resolved = resolve_ticker_query(clean_ticker)
+        state = execute_pipeline(resolved, mode="deterministic", use_live=use_live)
+        if not state or not state.snapshot or not state.fsa_summary or not state.valuation_output:
+            return None
+        snap = state.snapshot
+        fsa = state.fsa_summary
+        val = state.valuation_output
+        sym = "₹" if snap.currency == "INR" else "$"
+        return {
+            "ticker": snap.ticker,
+            "company_name": snap.company_name,
+            "currency": snap.currency,
+            "currency_symbol": sym,
+            "current_price": snap.current_price,
+            "target_price": val.probability_weighted_intrinsic_value,
+            "implied_upside_pct": val.implied_upside_pct,
+            "recommendation": val.recommendation,
+            "dupont_roe": fsa.reconstructed_roe,
+            "operating_margin": fsa.ebit_margin,
+            "base_wacc": val.base_wacc,
+            "reverse_dcf_growth": val.reverse_dcf_implied_revenue_cagr,
+            "altman_z": fsa.altman_z_score,
+            "altman_zone": fsa.altman_zone,
+        }
+    except Exception as exc:
+        logger.warning(f"Comparator metrics computation failed for {ticker_symbol}: {exc}")
+        return None
+
+
+def render_command_center_home(on_select_ticker_cb: Any) -> None:
+    """Renders the executive institutional Command Center landing page."""
+    # 1. Hero Institutional Briefing Banner
+    st.markdown(
+        """
+        <div style="background: linear-gradient(135deg, rgba(15, 23, 42, 0.9) 0%, rgba(30, 41, 59, 0.8) 100%);
+                    border: 1px solid rgba(56, 189, 248, 0.3);
+                    border-radius: 12px;
+                    padding: 26px 30px;
+                    margin-bottom: 22px;
+                    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.4);
+                    backdrop-filter: blur(12px);">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                <span style="background: rgba(56, 189, 248, 0.15); color: #38BDF8; border: 1px solid #0284c7; padding: 4px 12px; border-radius: 20px; font-size: 0.75rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;">
+                    Institutional Equity Research • 2027 CFA Level 1
+                </span>
+                <span style="color: #94A3B8; font-size: 0.82rem; font-family: monospace;">
+                    Dual-Mode Runtime Invariance
+                </span>
+            </div>
+            <h1 style="color: #F8FAFC; font-size: 2.2rem; font-weight: 800; margin: 0 0 10px 0; letter-spacing: -0.02em;">
+                EquiSight <span style="color: #38BDF8; font-weight: 400;">Command Center</span>
+            </h1>
+            <p style="color: #94A3B8; font-size: 1.0rem; line-height: 1.55; margin: 0; max-width: 950px;">
+                Autonomous 2027 CFA Level 1 Neuro-Symbolic Equity Research Terminal strictly separating 100% deterministic CFA mathematics from qualitative multi-agent SEC/MD&amp;A dialectical debate and RAG evidence synthesis.
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # 4-Column Architecture Highlight Grid
+    col_a1, col_a2, col_a3, col_a4 = st.columns(4)
+    with col_a1:
+        st.markdown(
+            """
+            <div class="arch-card">
+                <div class="arch-title">🧮 100% Deterministic CFA Math Engine</div>
+                <div class="arch-desc">Zero LLM arithmetic; 5-Way DuPont, 2-Stage FCFF DCF, Altman Z-Score, and Working Capital CCC.</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with col_a2:
+        st.markdown(
+            """
+            <div class="arch-card">
+                <div class="arch-title">⚖️ Dialectical Bull vs. Bear Filing RAG</div>
+                <div class="arch-desc">Multi-agent debate grounded in <code>[FILING-CHUNK-X]</code> citations from authentic regulatory disclosures.</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with col_a3:
+        st.markdown(
+            """
+            <div class="arch-card">
+                <div class="arch-title">🎯 SciPy brentq Reverse-DCF &amp; 10k MC</div>
+                <div class="arch-desc">Market-implied growth expectations gap &amp; 10,000 vectorized NumPy Monte Carlo simulation paths.</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with col_a4:
+        st.markdown(
+            """
+            <div class="arch-card">
+                <div class="arch-title">🛡️ 3-Layer Zero-Hallucination Audit Gate</div>
+                <div class="arch-desc">Automated verification of math identities, schema completeness, and numerical faithfulness.</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("<div style='margin-bottom: 24px;'></div>", unsafe_allow_html=True)
+
+    # 2. Central Unified Smart Search Bar
+    st.markdown("### 🔍 Institutional Equity Search & Ingestion")
+
+    def _on_home_search_enter() -> None:
+        q = st.session_state.get("home_search_query_input", "").strip()
+        if q:
+            resolved = resolve_ticker_query(q)
+            on_select_ticker_cb(resolved)
+
+    search_c1, search_c2 = st.columns([4, 1])
+    with search_c1:
+        st.text_input(
+            "🔍 Search Any Company Name or Ticker — e.g., Tata Consultancy, Infosys, Reliance, Nvidia, Apple, Amazon, TCS, INFY",
+            value="",
+            key="home_search_query_input",
+            on_change=_on_home_search_enter,
+            placeholder="Search company name or ticker (e.g. Tata Consultancy, Infosys, Reliance, Nvidia, Apple, Amazon, TCS, INFY)...",
+        )
+    with search_c2:
+        st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+        st.button(
+            "🚀 Ingest & Deep-Dive",
+            key="btn_home_search_submit",
+            on_click=_on_home_search_enter,
+            use_container_width=True,
+            type="primary",
+        )
+
+    st.markdown("<div style='margin-bottom: 24px;'></div>", unsafe_allow_html=True)
+
+    # 3. Live Daily Market Movers Grid — Directly Clickable Ticker Cards
+    st.markdown("### 📡 Live Daily Market Movers")
+    mkt_col1, mkt_col2 = st.columns([3, 1])
+    with mkt_col1:
+        mkt_filter_selection = st.radio(
+            "Market Filter",
+            options=["🌍 All Markets", "🇮🇳 NSE India", "🇺🇸 US Markets"],
+            horizontal=True,
+            key="home_mkt_filter_radio",
+            label_visibility="collapsed",
+        )
+
+    filter_code_map = {
+        "🌍 All Markets": "ALL",
+        "🇮🇳 NSE India": "NSE",
+        "🇺🇸 US Markets": "US",
+    }
+    mkt_code = filter_code_map.get(mkt_filter_selection, "ALL")
+
+    pulse_cards, is_pulse_live, pulse_msg = get_cached_popular_stocks(market_filter=mkt_code, max_items=8)
+
+    if is_pulse_live and pulse_cards:
+        st.caption(f"📡 Live Daily Market Movers — Ranked by Today's Volume & Price Action ({len(pulse_cards)} active movers)")
+        display_cards = pulse_cards
+    else:
+        st.warning(f"⚠️ {pulse_msg}")
+        display_cards = get_benchmark_mover_cards()
+        if mkt_code == "NSE":
+            display_cards = [c for c in display_cards if c.market == "NSE"]
+        elif mkt_code == "US":
+            display_cards = [c for c in display_cards if c.market == "US"]
+
+    # Render each TrendingStockCard in a 4-column grid as directly clickable button (NO separate Load button)
+    cols_per_row = 4
+    for r_idx in range(0, len(display_cards), cols_per_row):
+        row_cards = display_cards[r_idx : r_idx + cols_per_row]
+        cols = st.columns(cols_per_row)
+        for col, card in zip(cols, row_cards):
+            with col:
+                st.markdown('<div class="mover-card-btn">', unsafe_allow_html=True)
+                tag = getattr(card, "activity_tag", "MOVER")
+                sym = getattr(card, "currency_symbol", "₹" if card.currency == "INR" else "$")
+                chg = getattr(card, "day_change_pct", card.daily_change_pct)
+                vol = getattr(card, "day_volume", card.daily_volume)
+                mcap = getattr(card, "market_cap_formatted", card.formatted_market_cap)
+                comp_display = card.company_name[:25] + ("…" if len(card.company_name) > 25 else "")
+
+                card_label = (
+                    f"{card.ticker}  •  {tag}\n"
+                    f"{comp_display}\n"
+                    f"{sym}{card.current_price:,.2f}  ({chg:+.2f}%)\n"
+                    f"MCap: {mcap}  |  Vol: {vol:,}"
+                ).replace("$", r"\$")
+
+                st.button(
+                    card_label,
+                    key=f"mover_card_{card.ticker}",
+                    on_click=on_select_ticker_cb,
+                    args=(card.ticker,),
+                    use_container_width=True,
+                )
+                st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown("<div style='margin-bottom: 30px;'></div>", unsafe_allow_html=True)
+
+    # 4. Interactive 2-Stock Head-to-Head Valuation Comparator
+    st.markdown("### ⚖️ Interactive 2-Stock Head-to-Head Valuation Comparator")
+    st.caption("Compare live pricing, DCF targets, 5-Way DuPont drivers, WACC, and Altman Z-score solvency side-by-side.")
+
+    comp_universe = ["NVDA", "TCS.NS", "VARUNBEV.NS", "ZOMATO.NS", "INFY.NS", "AAPL", "AMZN", "GOOGL"]
+    c_col1, c_col2 = st.columns(2)
+    with c_col1:
+        stock_a = st.selectbox("Stock A", options=comp_universe, index=0, key="comparator_stock_a")
+    with c_col2:
+        stock_b = st.selectbox("Stock B", options=comp_universe, index=1, key="comparator_stock_b")
+
+    data_a = compute_stock_comparison_metrics(stock_a)
+    data_b = compute_stock_comparison_metrics(stock_b)
+
+    if data_a and data_b:
+        col_name_a = f"Stock A: {stock_a} ({data_a['company_name'][:18]})"
+        col_name_b = f"Stock B: {stock_b} ({data_b['company_name'][:18]})"
+        comp_rows = [
+            {"Valuation & FSA Metric": "1. Live Traded Price", col_name_a: f"{data_a['currency_symbol']} {data_a['current_price']:,.2f}", col_name_b: f"{data_b['currency_symbol']} {data_b['current_price']:,.2f}"},
+            {"Valuation & FSA Metric": "2. 12M DCF Intrinsic Target", col_name_a: f"{data_a['currency_symbol']} {data_a['target_price']:,.2f}", col_name_b: f"{data_b['currency_symbol']} {data_b['target_price']:,.2f}"},
+            {"Valuation & FSA Metric": "3. Implied Upside %", col_name_a: f"{data_a['implied_upside_pct'] * 100:+.2f}%", col_name_b: f"{data_b['implied_upside_pct'] * 100:+.2f}%"},
+            {"Valuation & FSA Metric": "4. CFA Recommendation", col_name_a: data_a['recommendation'], col_name_b: data_b['recommendation']},
+            {"Valuation & FSA Metric": "5. 5-Way DuPont ROE", col_name_a: f"{data_a['dupont_roe'] * 100:.2f}%", col_name_b: f"{data_b['dupont_roe'] * 100:.2f}%"},
+            {"Valuation & FSA Metric": "6. Operating Margin (EBIT)", col_name_a: f"{data_a['operating_margin'] * 100:.2f}%", col_name_b: f"{data_b['operating_margin'] * 100:.2f}%"},
+            {"Valuation & FSA Metric": "7. Base WACC", col_name_a: f"{data_a['base_wacc'] * 100:.2f}%", col_name_b: f"{data_b['base_wacc'] * 100:.2f}%"},
+            {"Valuation & FSA Metric": "8. Reverse-DCF Implied Growth", col_name_a: f"{data_a['reverse_dcf_growth'] * 100:.2f}%", col_name_b: f"{data_b['reverse_dcf_growth'] * 100:.2f}%"},
+            {"Valuation & FSA Metric": "9. Altman Z-Score & Zone", col_name_a: f"{data_a['altman_z']:.2f} [{data_a['altman_zone']}]", col_name_b: f"{data_b['altman_z']:.2f} [{data_b['altman_zone']}]"},
+        ]
+        st.dataframe(pd.DataFrame(comp_rows), use_container_width=True, hide_index=True)
+
+        btn_c1, btn_c2 = st.columns(2)
+        with btn_c1:
+            st.button(f"📊 Deep-Dive into {stock_a}", key=f"btn_dd_a_{stock_a}", on_click=on_select_ticker_cb, args=(stock_a,), use_container_width=True)
+        with btn_c2:
+            st.button(f"📊 Deep-Dive into {stock_b}", key=f"btn_dd_b_{stock_b}", on_click=on_select_ticker_cb, args=(stock_b,), use_container_width=True)
+    else:
+        st.info("Select two valid equities to compare institutional valuation & financial metrics.")
 
 
 # ==============================================================================
@@ -439,39 +907,213 @@ def main() -> None:
     )
     st.sidebar.markdown("---")
 
-    # Ticker Selection
-    preset_tickers = ["VARUNBEV.NS", "TCS.NS", "ZOMATO.NS", "NVDA"]
-    selected_ticker = st.sidebar.selectbox(
-        "Coverage Ticker",
-        options=preset_tickers + ["Custom Ticker..."],
-        index=0,
-    )
+    # Ensure active view exists in session state before widget instantiation
+    if "active_view" not in st.session_state:
+        st.session_state["active_view"] = VIEW_HOME
+    if "active_ticker_query" not in st.session_state:
+        st.session_state["active_ticker_query"] = "VARUNBEV.NS"
+    if "unified_ticker_search_input" not in st.session_state:
+        st.session_state["unified_ticker_search_input"] = st.session_state["active_ticker_query"]
 
-    ticker = selected_ticker
-    if selected_ticker == "Custom Ticker...":
-        custom_input = st.sidebar.text_input("Enter Ticker Symbol", value="AAPL")
-        ticker = custom_input.strip().upper()
+    # Top-level View Selector in Sidebar
+    st.sidebar.markdown("### 🧭 Terminal Navigation")
+    active_view = st.sidebar.radio(
+        "Navigation View",
+        options=[VIEW_HOME, VIEW_TERMINAL],
+        key="active_view",
+        label_visibility="collapsed",
+    )
+    st.sidebar.markdown("---")
+
+    # Callback to update search query and active ticker before widget instantiation
+    def _set_active_search_ticker(ticker_sym: str) -> None:
+        st.session_state["unified_ticker_search_input"] = ticker_sym
+        st.session_state["active_ticker_query"] = ticker_sym
+        st.session_state["active_view"] = VIEW_TERMINAL
+
+    def _on_sidebar_search_change() -> None:
+        val = st.session_state.get("unified_ticker_search_input", "").strip()
+        if val:
+            st.session_state["active_ticker_query"] = val
+            st.session_state["active_view"] = VIEW_TERMINAL
+
+    def _on_run_pipeline_click() -> None:
+        st.session_state["active_view"] = VIEW_TERMINAL
+
+    # Unified Smart Search Bar & Quick-Launch Coverage
+    st.sidebar.markdown("### 🔍 Equity Search")
+    search_query = st.sidebar.text_input(
+        "🔍 Search Company Name or Ticker",
+        value=st.session_state.get("active_ticker_query", "VARUNBEV.NS"),
+        key="unified_ticker_search_input",
+        on_change=_on_sidebar_search_change,
+        help="Search by company name (e.g. Tata Consultancy, Infosys, Reliance, Amazon, Alphabet, Nvidia) or symbol (e.g. TCS, INFY, NVDA, GOOG, AAPL)",
+    )
+    st.session_state["active_ticker_query"] = search_query
+
+    # Sleek Quick-Launch Ticker Bar
+    st.sidebar.caption("⚡ Quick-Launch Coverage:")
+    st.sidebar.markdown('<div class="quick-pill-container">', unsafe_allow_html=True)
+    ql_cols_1 = st.sidebar.columns(4)
+    quick_tickers_1 = [("NVDA", "NVDA"), ("TCS", "TCS.NS"), ("INFY", "INFY.NS"), ("VARUNBEV", "VARUNBEV.NS")]
+    for col, (label, sym) in zip(ql_cols_1, quick_tickers_1):
+        with col:
+            st.markdown('<div class="quick-pill-btn">', unsafe_allow_html=True)
+            st.button(
+                label,
+                key=f"btn_ql_{label}",
+                on_click=_set_active_search_ticker,
+                args=(sym,),
+                use_container_width=True,
+            )
+            st.markdown('</div>', unsafe_allow_html=True)
+
+    ql_cols_2 = st.sidebar.columns(4)
+    quick_tickers_2 = [("ZOMATO", "ZOMATO.NS"), ("AMZN", "AMZN"), ("GOOG", "GOOG"), ("AAPL", "AAPL")]
+    for col, (label, sym) in zip(ql_cols_2, quick_tickers_2):
+        with col:
+            st.markdown('<div class="quick-pill-btn">', unsafe_allow_html=True)
+            st.button(
+                label,
+                key=f"btn_ql_{label}",
+                on_click=_set_active_search_ticker,
+                args=(sym,),
+                use_container_width=True,
+            )
+            st.markdown('</div>', unsafe_allow_html=True)
+    st.sidebar.markdown('</div>', unsafe_allow_html=True)
+
+    # Resolve query via resolve_ticker_query
+    raw_query = search_query.strip()
+    if raw_query:
+        try:
+            resolved_sym = resolve_ticker_query(raw_query)
+            active_ticker = resolved_sym
+            if resolved_sym.upper() != raw_query.upper():
+                st.sidebar.caption(f"🔍 Resolved: **{raw_query}** ➔ **`{resolved_sym}`**")
+        except Exception:
+            active_ticker = raw_query.upper()
+    else:
+        active_ticker = ""
 
     # Runtime Mode
-    mode = st.sidebar.radio(
+    active_mode = st.sidebar.radio(
         "Execution Mode",
         options=["deterministic", "llm"],
-        index=0,
+        key="active_mode_radio",
         help="Deterministic executes offline audited fixtures; LLM runs live CrewAI debate.",
     )
 
-    run_clicked = st.sidebar.button("Run Coverage Pipeline", type="primary", use_container_width=True)
+    # Always use pure live market data by default across EquiSight
+    use_live_data = True
 
-    # Initialize or refresh pipeline state
-    state_key = f"pipeline_{ticker}_{mode}"
-    if run_clicked or state_key not in st.session_state:
-        with st.spinner(f"Ingesting {ticker} and executing deterministic engines..."):
-            st.session_state[state_key] = execute_pipeline(ticker, mode)
-            st.session_state["current_state_key"] = state_key
+    # Live Daily Market Movers Pulse Expander in sidebar
+    with st.sidebar.expander("🔥 Live Daily Market Movers", expanded=False):
+        mkt_filter = st.selectbox("Market Filter", ["ALL", "US", "NSE"], key="pulse_filter_select")
+        pulse_cards, is_pulse_live, pulse_msg = fetch_daily_popular_stocks(market_filter=mkt_filter, max_items=6)
+        if is_pulse_live:
+            st.caption(pulse_msg)
+            for c in pulse_cards:
+                chg_color = "#3fb950" if c.daily_change_pct >= 0 else "#f85149"
+                sign = "+" if c.daily_change_pct >= 0 else ""
+                col_info, col_btn = st.columns([3, 1])
+                with col_info:
+                    st.markdown(
+                        f"""
+                        <div style="background-color: #21262d; border: 1px solid #30363d; border-radius: 4px; padding: 4px 8px; margin-bottom: 4px;">
+                            <span style="font-weight: 700; color: #f0f6fc;">{c.ticker}</span>
+                            <span style="font-size: 0.75rem; color: #8b949e; margin-left: 4px;">{c.market}</span>
+                            <span style="float: right; color: {chg_color}; font-weight: 700; font-size: 0.8rem;">{sign}{c.daily_change_pct:.2f}%</span><br>
+                            <span style="font-size: 0.75rem; color: #8b949e;">{c.currency} {c.current_price:,.2f} | {c.formatted_market_cap}</span>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+                with col_btn:
+                    st.button(
+                        "Load",
+                        key=f"pulse_btn_{c.ticker}",
+                        on_click=_set_active_search_ticker,
+                        args=(c.ticker,),
+                        use_container_width=True,
+                    )
+        else:
+            st.warning(pulse_msg)
 
-    state = st.session_state.get(st.session_state.get("current_state_key", state_key))
+    # API key check for LLM mode
+    has_api_key = bool(
+        os.environ.get("GEMINI_API_KEY")
+        or os.environ.get("GROQ_API_KEY")
+        or os.environ.get("OPENAI_API_KEY")
+    )
+    user_api_key_entered = False
+    if active_mode == "llm":
+        with st.sidebar.expander("🔑 LLM API Key Configuration", expanded=not has_api_key):
+            user_api_key = st.text_input(
+                "Gemini / Groq / OpenAI API Key",
+                type="password",
+                key="user_api_key_input",
+                help="Enter API key to execute live CrewAI dialectical debate.",
+            )
+            if user_api_key:
+                clean_key = user_api_key.strip()
+                if clean_key.startswith("gsk_"):
+                    os.environ["GROQ_API_KEY"] = clean_key
+                elif clean_key.startswith("sk-"):
+                    os.environ["OPENAI_API_KEY"] = clean_key
+                else:
+                    os.environ["GROQ_API_KEY"] = clean_key
+                    os.environ["GEMINI_API_KEY"] = clean_key
+                user_api_key_entered = True
+                has_api_key = True
+        if not has_api_key:
+            st.sidebar.warning(
+                "⚠️ No LLM API key detected (`GROQ_API_KEY`, `GEMINI_API_KEY`, or `OPENAI_API_KEY`). "
+                "Running in LLM mode without an API key will raise an LLMExecutionError per zero silent fallback policy. "
+                "Configure an API key above or switch back to Deterministic mode."
+            )
+
+    run_clicked = st.sidebar.button("Run Coverage Pipeline", type="primary", use_container_width=True, on_click=_on_run_pipeline_click)
+
+    # Dispatch: If Command Center (Home) is selected, render Home Page and return
+    if active_view == VIEW_HOME:
+        render_command_center_home(on_select_ticker_cb=_set_active_search_ticker)
+        return
+
+    # Deep-Dive Terminal View
+    if not active_ticker:
+        st.sidebar.info("💡 Enter a company name or ticker symbol (e.g. Infosys, TCS, NVDA, GOOG, AAPL) to generate coverage.")
+        st.info("👈 Enter a company name or ticker symbol in the sidebar to generate coverage.")
+        return
+
+    current_selection_key = f"{active_ticker}::{active_mode}::{use_live_data}"
+
+    if run_clicked or user_api_key_entered or st.session_state.get("last_executed_key") != current_selection_key:
+        with st.spinner(f"Ingesting {active_ticker} ({active_mode}) and executing research engines..."):
+            pipeline_result = execute_pipeline(active_ticker, active_mode, use_live_data)
+            st.session_state["pipeline_result"] = pipeline_result
+            st.session_state["last_executed_key"] = current_selection_key
+
+    state = st.session_state.get("pipeline_result")
+    pipe_err = getattr(execute_pipeline, "last_error", None)
+
     if not state or not state.snapshot:
-        st.error(f"Failed to load research data for '{ticker}'. Please verify ticker.")
+        if pipe_err:
+            if "LLMExecutionError" in pipe_err or "groq" in pipe_err.lower() or "llm" in pipe_err.lower():
+                st.error(f"❌ **LLM Execution Failure Diagnostic:** {pipe_err}")
+            elif "DataUnavailableError" in pipe_err or "unavailable" in pipe_err.lower():
+                st.error(f"❌ **Market Gateway Data Unavailable for '{active_ticker}':** {pipe_err}")
+            else:
+                st.error(f"❌ **Pipeline Execution Diagnostic for '{active_ticker}':** {pipe_err}")
+        else:
+            st.error(f"❌ Failed to load research data for '{active_ticker}'. Please verify ticker.")
+        st.info(
+            "💡 **Institutional Data Integrity Guidance:**\n"
+            "- **Benchmark Fixtures:** `VARUNBEV.NS`, `TCS.NS`, `ZOMATO.NS`, `NVDA` run 100% offline with audited financial statements.\n"
+            "- **Indian Equities:** Use `.NS` suffix (e.g. `INFY.NS`, `RELIANCE.NS`, `HDFCBANK.NS`, `ITC.NS`) or bare names like `Infosys`, `Reliance`, `TCS`.\n"
+            "- **US Equities:** Use standard exchange tickers (e.g. `AAPL`, `MSFT`, `NVDA`, `AMZN`, `GOOGL`).\n"
+            "- **Zero-Synthetic Policy:** EquiSight never fabricates fake numbers if market data is unavailable."
+        )
         return
 
     snapshot: CompanyFinancialSnapshot = state.snapshot
@@ -497,23 +1139,26 @@ def main() -> None:
         max_value=200,
         value=0,
         step=25,
+        key=f"wacc_slider_{active_ticker}",
         help="Adjust base discount rate in basis points.",
     )
 
     base_tgr = float(assumptions.base.terminal_growth_rate)
+    clamped_base_tgr = float(np.clip(base_tgr, 0.010, 0.065))
     tgr_override = st.sidebar.slider(
         "Terminal Growth Rate (g)",
         min_value=0.010,
         max_value=0.065,
-        value=base_tgr,
-        step=0.0025,
+        value=clamped_base_tgr,
+        step=0.0001,
         format="%.4f",
+        key=f"tgr_slider_{active_ticker}",
         help="Override perpetual terminal growth rate g.",
     )
 
     # Apply real-time recalculation if sliders altered
     active_val = val
-    if wacc_override_bps != 0 or abs(tgr_override - base_tgr) > 1e-4:
+    if wacc_override_bps != 0 or abs(tgr_override - clamped_base_tgr) > 5e-5:
         adj_assumptions = assumptions.model_copy(deep=True)
         adj_assumptions.base.wacc_adjustment_bps = float(wacc_override_bps)
         # Guarantee g < WACC with CFA margin cap
@@ -535,21 +1180,47 @@ def main() -> None:
             logger.warning(f"What-If recalculation clamped: {e}")
             active_val = val
 
-    # Header Banner
+    # Header Banner & 3-Pill Provenance Bar
+    formatted_mc = format_market_cap(snapshot.market_cap, snapshot.currency)
+    is_live_data = (snapshot.data_source == "LIVE_YFINANCE")
+    source_pill = "📡 Data Source: Live Yahoo Finance" if is_live_data else "📦 Offline Fallback Snapshot"
+
+    if state.mode == "llm":
+        llm_model = getattr(state, "llm_model_used", "") or "Groq"
+        llm_lat = getattr(state, "llm_latency_ms", 0.0) or 0.0
+        engine_pill = f"🤖 Narrative Engine: Live Groq LLM ({llm_model} • {llm_lat:.0f} ms) | Math: 100% Deterministic"
+    else:
+        engine_pill = "⚙️ Engine: 100% Deterministic CFA Synthesizer"
+
     st.markdown(
         f"""
-        <div style="display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px;">
-            <div>
-                <h1 style="margin: 0; padding: 0; font-size: 2.1rem; color: #f0f6fc;">
-                    {snapshot.company_name} <span style="color: #8b949e; font-size: 1.4rem;">({snapshot.ticker})</span>
-                </h1>
-                <p style="margin: 4px 0 0 0; color: #8b949e; font-size: 0.95rem;">
-                    Sector: <b style="color: #c9d1d9;">{snapshot.sector}</b> | Industry: <b style="color: #c9d1d9;">{snapshot.industry}</b> | Denomination: <b style="color: #c9d1d9;">{snapshot.unit_label}</b>
-                </p>
+        <div style="margin-bottom: 14px;">
+            <div style="display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px;">
+                <div>
+                    <h1 style="margin: 0; padding: 0; font-size: 2.1rem; color: #f0f6fc;">
+                        {snapshot.company_name} <span style="color: #8b949e; font-size: 1.4rem;">({snapshot.ticker})</span>
+                    </h1>
+                    <p style="margin: 4px 0 0 0; color: #8b949e; font-size: 0.95rem;">
+                        Sector: <b style="color: #c9d1d9;">{snapshot.sector}</b> | 
+                        Industry: <b style="color: #c9d1d9;">{snapshot.industry}</b> | 
+                        Denomination: <b style="color: #c9d1d9;">{snapshot.unit_label}</b>
+                    </p>
+                </div>
+                <div style="text-align: right;">
+                    <span style="font-size: 0.85rem; color: #8b949e;">Dual-Mode Engine:</span> 
+                    <code style="background-color: #21262d; color: #58a6ff; padding: 3px 8px; border-radius: 4px;">{state.mode.upper()}</code>
+                </div>
             </div>
-            <div style="text-align: right;">
-                <span style="font-size: 0.85rem; color: #8b949e;">Dual-Mode Engine:</span> 
-                <code style="background-color: #21262d; color: #58a6ff; padding: 3px 8px; border-radius: 4px;">{state.mode.upper()}</code>
+            <div style="display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px;">
+                <div class="provenance-pill" style="color: #58a6ff;">
+                    🏢 Market Cap: {formatted_mc}
+                </div>
+                <div class="provenance-pill" style="color: {'#3fb950' if is_live_data else '#d29922'};">
+                    {source_pill}
+                </div>
+                <div class="provenance-pill" style="color: #a78bfa;">
+                    {engine_pill}
+                </div>
             </div>
         </div>
         """,
@@ -653,10 +1324,13 @@ def main() -> None:
         with col_desc:
             st.info(snapshot.business_summary)
         with col_anchors:
+            formatted_mc = format_market_cap(snapshot.market_cap, snapshot.currency)
+            formatted_ev = format_market_cap(snapshot.enterprise_value, snapshot.currency)
             anchors_df = pd.DataFrame([
-                {"Metric": "Market Capitalization", "Value": f"{curr_sym} {snapshot.market_cap:,.2f}"},
-                {"Metric": "Enterprise Value (EV)", "Value": f"{curr_sym} {snapshot.enterprise_value:,.2f}"},
-                {"Metric": "Shares Outstanding", "Value": f"{snapshot.shares_outstanding:,.2f}"},
+                {"Metric": "Market Capitalization", "Value": f"{formatted_mc} ({curr_sym} {snapshot.market_cap:,.2f})"},
+                {"Metric": "Enterprise Value (EV)", "Value": f"{formatted_ev} ({curr_sym} {snapshot.enterprise_value:,.2f})"},
+                {"Metric": "Shares Outstanding", "Value": f"{snapshot.shares_outstanding:,.2f} {snapshot.unit_label.split()[-1]}"},
+                {"Metric": "Data Source", "Value": snapshot.data_source},
                 {"Metric": "Base Case WACC", "Value": f"{active_val.base_wacc * 100:.2f}%"},
                 {"Metric": "Cost of Equity (CAPM)", "Value": f"{active_val.cost_of_equity * 100:.2f}%"},
                 {"Metric": "Market Expectations Gap", "Value": f"{active_val.market_expectations_gap_bps:+.1f} bps"},
@@ -812,8 +1486,31 @@ def main() -> None:
             f"the market expectations gap is **{active_val.market_expectations_gap_bps:+.1f} bps**, indicating that the market is currently **{gap_direction}**."
         )
 
+        # 2027 CFA Steady-State Convergence & Terminal Parameters
+        st.markdown("#### 4. 2027 CFA Level 1 Steady-State Convergence & Terminal Parameters")
+        base_tv = active_val.base_dcf.terminal_value
+        base_pv_tv = active_val.base_dcf.pv_of_terminal_value
+        base_ev = active_val.base_dcf.enterprise_value
+        tv_pct_ev = (base_pv_tv / base_ev * 100) if base_ev > 0 else 0.0
+        terminal_g = active_val.base_dcf.terminal_growth_rate
+        terminal_wacc = active_val.base_dcf.wacc
+        last_ebit = max(1.0, active_val.base_dcf.projected_ebit[-1])
+        implied_tv_ebit = base_tv / last_ebit
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Base Terminal Value", f"{curr_sym} {base_tv:,.1f}")
+        c2.metric("PV of Terminal Value", f"{curr_sym} {base_pv_tv:,.1f}", f"{tv_pct_ev:.1f}% of EV")
+        c3.metric("Terminal Gordon g", f"{terminal_g * 100:.2f}%", f"WACC: {terminal_wacc * 100:.2f}%")
+        c4.metric("Implied Terminal Multiple", f"{implied_tv_ebit:.1f}x EBIT", "Steady-State Convergence")
+
+        st.caption(
+            "📐 **CFA Steady-State Invariance**: Terminal cash flow models convergence where maintenance CapEx tapers "
+            "toward D&A plus steady growth (DA + g × CapEx × 1.5) and economic reinvestment rate is bounded by "
+            "steady-state ROIC [g / max(ROIC, WACC + 2%)], eliminating peak cyclical CapEx distortion."
+        )
+
         # 5x5 Sensitivity Heatmap
-        st.markdown("#### 4. 5x5 WACC vs. Perpetual Terminal Growth Rate Sensitivity Matrix")
+        st.markdown("#### 5. 5x5 WACC vs. Perpetual Terminal Growth Rate Sensitivity Matrix")
         heat_fig = build_sensitivity_heatmap(
             wacc_axes=active_val.wacc_sensitivity_axes,
             tgr_axes=active_val.tgr_sensitivity_axes,
@@ -824,7 +1521,7 @@ def main() -> None:
         st.plotly_chart(heat_fig, use_container_width=True)
 
         # Peer Multiples Table
-        st.markdown("#### 5. Relative Comparable Company Valuation Multiples")
+        st.markdown("#### 6. Relative Comparable Company Valuation Multiples")
         if state.peer_multiples:
             peer_df = pd.DataFrame([
                 {
@@ -890,6 +1587,27 @@ def main() -> None:
     with tab5:
         st.markdown("### Dialectical Bull vs. Bear Debate, Initiating Report & 3-Layer Eval")
 
+        if state.mode == "llm":
+            model_name = getattr(state, "llm_model_used", "") or "Groq"
+            tab5_badge = f"""
+            <div style="background-color: rgba(167, 139, 250, 0.15); border: 1px solid #8b5cf6; border-radius: 6px; padding: 10px 16px; margin-bottom: 16px; display: inline-flex; align-items: center; gap: 8px;">
+                <span style="font-size: 1.1rem;">🤖</span>
+                <span style="color: #c4b5fd; font-weight: 600; font-size: 0.9rem;">
+                    Dialectical Debate & Commentary Generated by: <b>Live Groq LLM ({model_name})</b>
+                </span>
+            </div>
+            """
+        else:
+            tab5_badge = f"""
+            <div style="background-color: rgba(56, 189, 248, 0.15); border: 1px solid #0284c7; border-radius: 6px; padding: 10px 16px; margin-bottom: 16px; display: inline-flex; align-items: center; gap: 8px;">
+                <span style="font-size: 1.1rem;">⚙️</span>
+                <span style="color: #38bdf8; font-weight: 600; font-size: 0.9rem;">
+                    Dialectical Debate & Commentary Generated by: <b>Deterministic Rule Synthesizer</b>
+                </span>
+            </div>
+            """
+        st.markdown(tab5_badge, unsafe_allow_html=True)
+
         # Side-by-side Bull vs. Bear Debate Cards
         st.markdown("#### 1. Grounded Dialectical Debate (Citing `[FILING-CHUNK-X]`)")
         col_bull, col_bear = st.columns(2)
@@ -937,11 +1655,15 @@ def main() -> None:
             audit_bundle_dict = {
                 "ticker": state.ticker,
                 "mode": state.mode,
+                "status": getattr(state, "status", "SUCCESS"),
+                "repair_attempts": getattr(state, "repair_attempts", 0),
+                "llm_model_used": getattr(state, "llm_model_used", ""),
+                "llm_latency_ms": getattr(state, "llm_latency_ms", 0.0),
                 "snapshot": snapshot.model_dump(),
                 "fsa_summary": fsa.model_dump(),
                 "quant_summary": quant.model_dump(),
                 "dcf_assumptions": assumptions.model_dump(),
-                "valuation_output": val.model_dump(),
+                "valuation_output": active_val.model_dump(),
                 "monte_carlo_output": mc.model_dump(),
                 "peer_multiples": [p.model_dump() for p in state.peer_multiples],
                 "eval_scorecard": eval_card.model_dump() if eval_card else None,

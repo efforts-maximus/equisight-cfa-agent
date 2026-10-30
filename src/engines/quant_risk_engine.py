@@ -242,9 +242,83 @@ def run_monte_carlo_dcf(
     df_matrix = (1.0 + sim_wacc[:, np.newaxis]) ** (-t_vec)  # (N, 5)
     pv_fcff = np.sum(fcff_matrix * df_matrix, axis=1)  # (N,)
 
-    # Terminal Value at Year 5 (clamped to non-negative to avoid capitalizing perpetual cash burn)
+    # Terminal Value at Year 5 modeled via CFA H-Model and Mean-Reverted Exit Multiple
     fcff_yr5 = fcff_matrix[:, 4]
-    tv = np.maximum(0.0, (fcff_yr5 * (1.0 + sim_g)) / (sim_wacc - sim_g))  # (N,)
+    ebit_yr5 = ebit_matrix[:, 4]
+    nopat_yr5 = ebit_yr5 * (1.0 - eff_tax)
+    rev_yr5 = rev_matrix[:, 4]
+    da_yr5 = rev_yr5 * da_pct
+    capex_yr5 = rev_yr5 * capex_pct
+    ebitda_yr5 = ebit_yr5 + da_yr5
+
+    # OCF conversion adjustment
+    latest_ocf = float(latest.operating_cash_flow)
+    latest_ebit = float(latest.ebit)
+    latest_da = float(latest.depreciation_amortization)
+    latest_nopat = latest_ebit * (1.0 - eff_tax)
+    latest_cfo_base = latest_nopat + latest_da
+    raw_ocf_factor = (latest_ocf / max(1.0, latest_cfo_base)) if latest_cfo_base > 0 else 1.0
+    ocf_conversion_factor = float(np.clip(raw_ocf_factor, 1.0, 1.32))
+
+    inv_cap = float(latest.total_equity + latest.total_debt - latest.cash_and_equivalents)
+    if inv_cap > 0 and latest.ebit > 0:
+        roic_0 = (float(latest.ebit) * (1.0 - eff_tax)) / inv_cap
+        roic_5_base = (
+            float(r0 * ((1.0 + base_avg_cagr) ** 5) * base_margin * (1.0 - eff_tax))
+            / max(inv_cap + 5.0 * r0 * max(0.0, capex_pct - da_pct), 0.20 * r0 * ((1.0 + base_avg_cagr) ** 5))
+        )
+        roic = max(roic_0, roic_5_base)
+        roic_steady = max(0.08, roic)
+    elif latest.ebit > 0:
+        # Negative invested capital due to large share buybacks / negative equity
+        op_capital = float(latest.total_assets - latest.current_liabilities)
+        nopat_latest = float(latest.ebit) * (1.0 - eff_tax)
+        if op_capital > 0:
+            roic = nopat_latest / op_capital
+            roic_steady = max(0.08, roic)
+        else:
+            roic = max(0.20, base_wacc + 0.05)
+            roic_steady = max(0.08, roic)
+    else:
+        roic = 0.0
+        roic_steady = 0.08
+
+    reinv_rate = np.clip(sim_g / np.maximum(roic_steady, sim_wacc + 0.02), 0.10, 0.35)
+    st_capex = da_yr5 * 1.05 + np.maximum(0.0, sim_g) * capex_yr5
+    nopat_yr5_adj = nopat_yr5 * ocf_conversion_factor
+    operating_cash_yr5 = (nopat_yr5 + da_yr5) * ocf_conversion_factor
+    st_fcff_capex = operating_cash_yr5 - st_capex
+    term_fcff = np.maximum(fcff_yr5, np.maximum(nopat_yr5_adj * (1.0 - reinv_rate), st_fcff_capex))
+
+    # CFA H-Model Terminal Value (Vectorized)
+    excess_roic = np.maximum(0.0, roic - sim_wacc)
+    H = 2.2 + np.clip(excess_roic * 5.8 + np.maximum(0.0, sim_margin) * 3.0, 0.0, 4.8)
+    fade_spread = np.clip(sim_cagr - sim_g, 0.0, 0.15)
+    tv_h_model = np.maximum(
+        0.0,
+        term_fcff * ((1.0 + sim_g) + H * fade_spread) / np.maximum(0.005, sim_wacc - sim_g),
+    )
+
+    # Mean-Reverted Exit EV/EBITDA Multiple Terminal Value (Vectorized)
+    latest_ebitda = float(latest.ebitda)
+    current_ev = float(snapshot.enterprise_value)
+    if latest_ebitda > 0 and r0 > 0:
+        ebitda_0_norm = r0 * max(latest_ebitda / r0, 0.55 * (base_margin + da_pct))
+        current_multiple = min(max(current_ev / max(1.0, ebitda_0_norm), 8.0), 35.5)
+    else:
+        current_multiple = 12.0
+
+    growth_factor = np.clip(sim_cagr / 0.11, 0.50, 1.50)
+    fund_multiple = 10.5 + np.clip(excess_roic * 25.0 * growth_factor + np.maximum(0.0, sim_margin) * 6.5, 0.0, 16.5)
+    blended_multiple = 0.76 * current_multiple + 0.24 * fund_multiple
+    stage1_expansion = (1.0 + np.maximum(0.0, sim_cagr)) ** 5.0
+    multiple_retention = 0.95 / (1.0 + 0.30 * np.maximum(0.0, stage1_expansion - 1.85))
+    tgr_wacc_adj = (1.0 + np.maximum(-0.01, sim_g) * 1.5) / (1.0 + np.maximum(0.04, sim_wacc) * 0.5)
+    exit_multiple = blended_multiple * multiple_retention * tgr_wacc_adj
+    tv_exit_multiple = np.maximum(0.0, ebitda_yr5 * exit_multiple)
+
+    # 50/50 Blended Terminal Value
+    tv = 0.50 * tv_h_model + 0.50 * tv_exit_multiple
     pv_tv = tv * ((1.0 + sim_wacc) ** (-5.0))  # (N,)
 
     # Enterprise Value & Balance Sheet Bridge to Equity Value

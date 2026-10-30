@@ -16,16 +16,21 @@ Tests:
 """
 
 import copy
+import json
 import re
+from unittest.mock import MagicMock, patch
 import pytest
 
 from src.agents.research_flow import (
     EquiSightResearchFlow,
     EquiSightState,
+    LLMExecutionError,
+    execute_groq_llm_synthesis,
     format_cfa_report,
     load_agent_configs,
     load_task_configs,
     repair_cfa_report,
+    select_groq_model,
     synthesize_deterministic_assumptions,
 )
 from src.agents.tools import RetrieveFilingEvidenceTool
@@ -735,8 +740,420 @@ class TestExtractionRegexes:
         downside_sample = "- **Implied Upside:** -0.40%"
         wacc_sample = "- **Base WACC:** 0.95%"
         roe_sample = "- **5-Way DuPont ROE:** 0.80%"
-
         assert abs(extract_implied_upside(upside_sample) - 0.0050) < 1e-5
         assert abs(extract_implied_upside(downside_sample) - (-0.0040)) < 1e-5
         assert abs(extract_base_wacc(wacc_sample) - 0.0095) < 1e-5
         assert abs(extract_dupont_roe(roe_sample) - 0.0080) < 1e-5
+
+
+# =============================================================================
+# 9. Anti-Hardcoding Source-Code Audit Tests
+# =============================================================================
+
+def test_zero_hardcoded_tickers_in_engines_and_agents():
+    """Permanent source-code audit asserting zero hardcoded benchmark tickers in engines and agents."""
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent
+    banned_tickers = ["VARUNBEV", "ZOMATO", "NVDA", "TCS", "AAPL", "AMZN", "GOOG", "MSFT", "INFY"]
+
+    target_dirs = [root / "src" / "engines", root / "src" / "agents"]
+    violations = []
+
+    for target_dir in target_dirs:
+        for py_file in target_dir.glob("**/*.py"):
+            with open(py_file, "r", encoding="utf-8") as f:
+                content = f.read()
+            for banned in banned_tickers:
+                if banned in content:
+                    violations.append(f"{py_file.name} contains banned ticker '{banned}'")
+
+    assert not violations, f"Anti-hardcoding violation(s) detected: {violations}"
+
+
+def test_dynamic_rag_synthesis_custom_ticker_fallback():
+    """Verifies dynamic RAG synthesis for a custom ticker with no local filing fixture."""
+    from src.data.market_gateway import fetch_company_snapshot
+    from src.engines.fsa_engine import compute_fsa_summary
+    from src.engines.quant_risk_engine import compute_quant_risk_summary
+    from src.agents.research_flow import synthesize_deterministic_assumptions
+    from src.schemas.models import CompanyFinancialSnapshot
+
+    base_snap = fetch_company_snapshot("NVDA", use_live=False)
+    snap_dict = base_snap.model_dump()
+    snap_dict["ticker"] = "CUSTOM_CORP"
+    snap_dict["company_name"] = "Custom Enterprise Systems Inc."
+    custom_snapshot = CompanyFinancialSnapshot(**snap_dict)
+
+    fsa = compute_fsa_summary(custom_snapshot)
+    quant = compute_quant_risk_summary(custom_snapshot)
+    assumptions = synthesize_deterministic_assumptions(custom_snapshot, fsa, quant)
+
+    # Invariants must hold
+    assert assumptions.bull.revenue_cagr_5yr[0] >= assumptions.base.revenue_cagr_5yr[0] >= assumptions.bear.revenue_cagr_5yr[0]
+    assert assumptions.bull.target_ebit_margin_yr5 >= assumptions.base.target_ebit_margin_yr5 >= assumptions.bear.target_ebit_margin_yr5
+    assert assumptions.bull.terminal_growth_rate >= assumptions.base.terminal_growth_rate >= assumptions.bear.terminal_growth_rate
+    assert any("[FILING-CHUNK-" in p for p in assumptions.bull_thesis_points)
+    assert any("[FILING-CHUNK-" in p for p in assumptions.bear_thesis_points)
+
+
+def test_dynamic_rag_synthesis_distressed_turnaround_company():
+    """Verifies dynamic synthesis for distressed company with negative historical CAGR and negative operating margins."""
+    from src.data.market_gateway import fetch_company_snapshot
+    from src.engines.fsa_engine import compute_fsa_summary
+    from src.engines.quant_risk_engine import compute_quant_risk_summary
+    from src.agents.research_flow import synthesize_deterministic_assumptions
+    from src.schemas.models import CompanyFinancialSnapshot
+
+    base_snap = fetch_company_snapshot("NVDA", use_live=False)
+    snap_dict = base_snap.model_dump()
+    snap_dict["ticker"] = "DISTRESSED_CO"
+    snap_dict["company_name"] = "Distressed Turnaround Corp"
+
+    # Make revenues shrink and margins negative
+    for i, yr in enumerate(snap_dict["historical_years"]):
+        yr["revenue"] = round(1000.0 * (0.90 ** i), 2)
+        yr["cogs"] = round(yr["revenue"] * 0.70, 2)
+        yr["gross_profit"] = round(yr["revenue"] * 0.30, 2)
+        yr["ebit"] = round(-yr["revenue"] * 0.08, 2)
+        yr["ebitda"] = round(yr["ebit"] + yr["depreciation_amortization"], 2)
+        yr["ebt"] = round(yr["ebit"] - yr["interest_expense"], 2)
+        yr["net_income"] = round(yr["ebt"], 2)
+        yr["tax_expense"] = 0.0
+        yr["operating_cash_flow"] = round(-yr["revenue"] * 0.04, 2)
+
+    distressed_snapshot = CompanyFinancialSnapshot(**snap_dict)
+    fsa = compute_fsa_summary(distressed_snapshot)
+    quant = compute_quant_risk_summary(distressed_snapshot)
+    assumptions = synthesize_deterministic_assumptions(distressed_snapshot, fsa, quant)
+
+    # Invariants must hold even for distressed / negative metrics
+    assert assumptions.bull.revenue_cagr_5yr[0] >= assumptions.base.revenue_cagr_5yr[0] >= assumptions.bear.revenue_cagr_5yr[0]
+    assert assumptions.bull.target_ebit_margin_yr5 >= assumptions.base.target_ebit_margin_yr5 >= assumptions.bear.target_ebit_margin_yr5
+    assert assumptions.bull.terminal_growth_rate >= assumptions.base.terminal_growth_rate >= assumptions.bear.terminal_growth_rate
+    assert -0.30 <= assumptions.bear.target_ebit_margin_yr5 <= 0.70
+    assert -0.30 <= assumptions.base.target_ebit_margin_yr5 <= 0.70
+    assert -0.30 <= assumptions.bull.target_ebit_margin_yr5 <= 0.70
+
+
+# =============================================================================
+# 10. Groq Multi-Agent LLM Synthesis Engine & Mathematical Invariance Tests
+# =============================================================================
+
+class TestGroqMultiAgentSynthesis:
+    """Verifies Groq API synthesis, credential error handling, model selection, and 100% mathematical invariance."""
+
+    def test_llm_execution_error_missing_api_key(self, monkeypatch):
+        """Verifies that calling mode='llm' without GROQ_API_KEY immediately raises LLMExecutionError."""
+        monkeypatch.delenv("GROQ_API_KEY", raising=False)
+        flow = EquiSightResearchFlow()
+        flow.state.ticker = "NVDA"
+        flow.state.mode = "llm"
+        flow.state.use_live = False
+
+        with pytest.raises(LLMExecutionError) as exc_info:
+            flow.kickoff()
+
+        err = exc_info.value
+        assert "GROQ_API_KEY" in str(err)
+        assert err.provider == "groq"
+
+    def test_llm_execution_error_empty_or_whitespace_key(self, monkeypatch):
+        """Verifies that empty string or whitespace-only GROQ_API_KEY raises LLMExecutionError."""
+        for bad_key in ["", "   ", "\t\n"]:
+            monkeypatch.setenv("GROQ_API_KEY", bad_key)
+            flow = EquiSightResearchFlow()
+            flow.state.ticker = "NVDA"
+            flow.state.mode = "llm"
+            flow.state.use_live = False
+
+            with pytest.raises(LLMExecutionError) as exc_info:
+                flow.kickoff()
+
+            err = exc_info.value
+            assert "GROQ_API_KEY" in str(err)
+            assert err.provider == "groq"
+
+    def test_llm_execution_error_invalid_api_key(self, monkeypatch):
+        """Verifies that calling mode='llm' with invalid key raises LLMExecutionError with HTTP 401."""
+        monkeypatch.setenv("GROQ_API_KEY", "gsk_invalid_test_key_nonexistent")
+        flow = EquiSightResearchFlow()
+        flow.state.ticker = "NVDA"
+        flow.state.mode = "llm"
+        flow.state.use_live = False
+
+        with pytest.raises(LLMExecutionError) as exc_info:
+            flow.kickoff()
+
+        err = exc_info.value
+        assert err.provider == "groq"
+        assert err.status_code == 401 or "401" in str(err)
+
+    def test_select_groq_model_env_override(self, monkeypatch):
+        """Verifies that GROQ_MODEL environment variable takes precedence when available."""
+        monkeypatch.setenv("GROQ_MODEL", "qwen/qwen3.8-27b")
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "data": [
+                {"id": "openai/gpt-oss-120b"},
+                {"id": "qwen/qwen3.8-27b"},
+            ]
+        }
+        with patch("requests.get", return_value=mock_resp):
+            selected = select_groq_model("test-key")
+            assert selected == "qwen/qwen3.8-27b"
+
+    def test_select_groq_model_priority_order(self, monkeypatch):
+        """Verifies priority cascade: gpt-oss-120b -> gpt-oss-20b -> qwen3.8-27b -> llama-3.3-70b-versatile."""
+        monkeypatch.delenv("GROQ_MODEL", raising=False)
+
+        # 1. 120b available
+        mock_resp1 = MagicMock(status_code=200)
+        mock_resp1.json.return_value = {"data": [{"id": "openai/gpt-oss-120b"}, {"id": "openai/gpt-oss-20b"}]}
+        with patch("requests.get", return_value=mock_resp1):
+            assert select_groq_model("key") == "openai/gpt-oss-120b"
+
+        # 2. 120b unavailable, 20b available
+        mock_resp2 = MagicMock(status_code=200)
+        mock_resp2.json.return_value = {"data": [{"id": "openai/gpt-oss-20b"}, {"id": "qwen/qwen3.8-27b"}]}
+        with patch("requests.get", return_value=mock_resp2):
+            assert select_groq_model("key") == "openai/gpt-oss-20b"
+
+        # 3. Only qwen available
+        mock_resp3 = MagicMock(status_code=200)
+        mock_resp3.json.return_value = {"data": [{"id": "qwen/qwen3.8-27b"}]}
+        with patch("requests.get", return_value=mock_resp3):
+            assert select_groq_model("key") == "qwen/qwen3.8-27b"
+
+        # 4. Only llama available
+        mock_resp4 = MagicMock(status_code=200)
+        mock_resp4.json.return_value = {"data": [{"id": "llama-3.3-70b-versatile"}]}
+        with patch("requests.get", return_value=mock_resp4):
+            assert select_groq_model("key") == "llama-3.3-70b-versatile"
+
+    def test_select_groq_model_rejects_audio_and_errors_when_no_chat_model(self, monkeypatch):
+        """Verifies that non-chat audio/guard models are ignored and LLMExecutionError is raised if no chat model."""
+        monkeypatch.delenv("GROQ_MODEL", raising=False)
+        mock_resp = MagicMock(status_code=200)
+        mock_resp.json.return_value = {
+            "data": [
+                {"id": "whisper-large-v3"},
+                {"id": "meta-llama/llama-prompt-guard-2-86m"},
+            ]
+        }
+        with patch("requests.get", return_value=mock_resp):
+            with pytest.raises(LLMExecutionError) as exc_info:
+                select_groq_model("key")
+            assert "No compatible chat completion models" in str(exc_info.value)
+            assert exc_info.value.status_code == 200
+
+    def test_select_groq_model_network_error(self):
+        """Verifies network connection error during model query raises LLMExecutionError with status_code=None."""
+        import requests
+        with patch("requests.get", side_effect=requests.exceptions.ConnectionError("Connection refused")):
+            with pytest.raises(LLMExecutionError) as exc_info:
+                select_groq_model("key")
+            assert exc_info.value.provider == "groq"
+            assert exc_info.value.status_code is None
+
+    def test_execute_groq_llm_synthesis_rate_limited(self):
+        """Verifies HTTP 429 response from Groq raises LLMExecutionError with status_code=429."""
+        snap = fetch_company_snapshot("NVDA", use_live=False)
+        peers = fetch_peer_multiples("NVDA", use_live=False)
+        fsa = compute_fsa_summary(snap)
+        quant = compute_quant_risk_summary(snap)
+        assumptions = synthesize_deterministic_assumptions(snap, fsa, quant)
+        val = run_valuation_suite(snap, assumptions, quant, peers)
+
+        mock_resp = MagicMock(status_code=429, text='{"error": {"message": "Rate limit exceeded"}}')
+        with patch("requests.post", return_value=mock_resp):
+            with pytest.raises(LLMExecutionError) as exc_info:
+                execute_groq_llm_synthesis(snap, fsa, quant, val, assumptions, "test-key", "openai/gpt-oss-120b")
+            assert exc_info.value.status_code == 429
+            assert "429" in str(exc_info.value)
+
+    def test_execute_groq_llm_synthesis_malformed_json_or_non_dict(self):
+        """Verifies non-dict or invalid JSON response raises LLMExecutionError."""
+        snap = fetch_company_snapshot("NVDA", use_live=False)
+        peers = fetch_peer_multiples("NVDA", use_live=False)
+        fsa = compute_fsa_summary(snap)
+        quant = compute_quant_risk_summary(snap)
+        assumptions = synthesize_deterministic_assumptions(snap, fsa, quant)
+        val = run_valuation_suite(snap, assumptions, quant, peers)
+
+        # 1. Invalid JSON string
+        mock_resp1 = MagicMock(status_code=200)
+        mock_resp1.json.return_value = {"choices": [{"message": {"content": "Not JSON at all"}}]}
+        with patch("requests.post", return_value=mock_resp1):
+            with pytest.raises(LLMExecutionError):
+                execute_groq_llm_synthesis(snap, fsa, quant, val, assumptions, "test-key", "openai/gpt-oss-120b")
+
+        # 2. JSON array instead of JSON object
+        mock_resp2 = MagicMock(status_code=200)
+        mock_resp2.json.return_value = {"choices": [{"message": {"content": '["item1", "item2"]'}}]}
+        with patch("requests.post", return_value=mock_resp2):
+            with pytest.raises(LLMExecutionError) as exc_info:
+                execute_groq_llm_synthesis(snap, fsa, quant, val, assumptions, "test-key", "openai/gpt-oss-120b")
+            assert "Expected JSON object" in str(exc_info.value)
+
+    def test_execute_groq_llm_synthesis_citation_normalization(self):
+        """Verifies that synthesis normalization automatically enforces authentic [FILING-CHUNK-X] citations."""
+        snap = fetch_company_snapshot("NVDA", use_live=False)
+        peers = fetch_peer_multiples("NVDA", use_live=False)
+        fsa = compute_fsa_summary(snap)
+        quant = compute_quant_risk_summary(snap)
+        assumptions = synthesize_deterministic_assumptions(snap, fsa, quant)
+        val = run_valuation_suite(snap, assumptions, quant, peers)
+
+        mock_payload = {
+            "bull_thesis_points": ["Demand is surging globally", "High gross margin resilience", "CUDA moat defense"],
+            "bear_thesis_points": ["Export restrictions impact revenue", "Packaging bottlenecks persist"],
+            "key_catalysts": ["Launch of next-gen architecture"],
+            "key_risks": ["Foundry capacity constraints"],
+            "debate_synthesis_summary": "While demand is strong, supply chain risks persist.",
+        }
+        mock_resp = MagicMock(status_code=200)
+        mock_resp.json.return_value = {"choices": [{"message": {"content": json.dumps(mock_payload)}}]}
+
+        with patch("requests.post", return_value=mock_resp):
+            res_assumptions, latency = execute_groq_llm_synthesis(
+                snap, fsa, quant, val, assumptions, "test-key", "openai/gpt-oss-120b"
+            )
+
+        assert len(res_assumptions.bull_thesis_points) == 3
+        assert len(res_assumptions.bear_thesis_points) == 3
+        assert len(res_assumptions.key_catalysts) == 3
+        assert len(res_assumptions.key_risks) == 3
+        assert all("[FILING-CHUNK-" in p for p in res_assumptions.bull_thesis_points)
+        assert all("[FILING-CHUNK-" in p for p in res_assumptions.bear_thesis_points)
+        assert "[FILING-CHUNK-" in res_assumptions.debate_synthesis_summary
+
+    def test_math_invariance_deterministic_vs_llm_mocked(self, monkeypatch):
+        """Verifies 100% mathematical invariance across modes with mocked LLM output on TCS.NS."""
+        monkeypatch.setenv("GROQ_API_KEY", "gsk_mock_valid_key")
+
+        mock_models_resp = MagicMock(status_code=200)
+        mock_models_resp.json.return_value = {"data": [{"id": "openai/gpt-oss-120b"}]}
+
+        mock_chat_payload = {
+            "bull_thesis_points": [
+                "Strong digital transformation deal book. [FILING-CHUNK-1]",
+                "Operating margin discipline across core geographies. [FILING-CHUNK-2]",
+                "Unmatched enterprise client retention. [FILING-CHUNK-4]",
+            ],
+            "bear_thesis_points": [
+                "Discretionary tech spend headwinds in BFSI. [FILING-CHUNK-5]",
+                "Working capital DSO elongation. [FILING-CHUNK-3]",
+                "Subcontractor cost wage pressure. [FILING-CHUNK-2]",
+            ],
+            "key_catalysts": [
+                "Recovery in banking vertical tech budgets. [FILING-CHUNK-1]",
+                "Margin expansion from automation. [FILING-CHUNK-2]",
+                "Accelerated mega-deal conversion. [FILING-CHUNK-6]",
+            ],
+            "key_risks": [
+                "Prolonged macro slowdown in North America. [FILING-CHUNK-5]",
+                "Attrition and wage inflation pressure. [FILING-CHUNK-2]",
+                "Regulatory visa and cross-border restrictions. [FILING-CHUNK-5]",
+            ],
+            "debate_synthesis_summary": "Balanced execution between margin resilience and deal growth. [FILING-CHUNK-1] [FILING-CHUNK-5]",
+        }
+        mock_chat_resp = MagicMock(status_code=200)
+        mock_chat_resp.json.return_value = {"choices": [{"message": {"content": json.dumps(mock_chat_payload)}}]}
+
+        with patch("requests.get", return_value=mock_models_resp), patch("requests.post", return_value=mock_chat_resp):
+            # Run deterministic
+            flow_det = EquiSightResearchFlow()
+            flow_det.kickoff(inputs={"ticker": "TCS.NS", "mode": "deterministic", "use_live": False})
+
+            # Run LLM
+            flow_llm = EquiSightResearchFlow()
+            flow_llm.kickoff(inputs={"ticker": "TCS.NS", "mode": "llm", "use_live": False})
+
+            assert flow_det.state.status == "SUCCESS"
+            assert flow_llm.state.status == "SUCCESS"
+
+            # Check 100% mathematical equality
+            v_det = flow_det.state.valuation_output
+            v_llm = flow_llm.state.valuation_output
+            assert v_det.probability_weighted_intrinsic_value == v_llm.probability_weighted_intrinsic_value
+            assert v_det.implied_upside_pct == v_llm.implied_upside_pct
+            assert v_det.base_wacc == v_llm.base_wacc
+            assert v_det.reverse_dcf_implied_revenue_cagr == v_llm.reverse_dcf_implied_revenue_cagr
+
+            # Check scenario drivers
+            for sc in ["bear", "base", "bull"]:
+                d1 = getattr(flow_det.state.dcf_assumptions, sc)
+                d2 = getattr(flow_llm.state.dcf_assumptions, sc)
+                assert d1.revenue_cagr_5yr == d2.revenue_cagr_5yr
+                assert d1.target_ebit_margin_yr5 == d2.target_ebit_margin_yr5
+                assert d1.effective_tax_rate == d2.effective_tax_rate
+                assert d1.terminal_growth_rate == d2.terminal_growth_rate
+                assert d1.wacc_adjustment_bps == d2.wacc_adjustment_bps
+
+            assert flow_llm.state.eval_scorecard.passed is True
+            assert flow_llm.state.eval_scorecard.overall_eval_score == 100.0
+
+    def test_math_invariance_deterministic_vs_llm(self):
+        """Verifies strict 100% mathematical invariance across deterministic and live Groq llm modes."""
+        import os
+
+        if not os.getenv("GROQ_API_KEY"):
+            pytest.skip("GROQ_API_KEY not set in environment.")
+
+        # 1. Execute deterministic pipeline
+        flow_det = EquiSightResearchFlow()
+        flow_det.kickoff(inputs={"ticker": "NVDA", "mode": "deterministic", "use_live": False})
+
+        # 2. Execute live Groq LLM pipeline
+        flow_llm = EquiSightResearchFlow()
+        flow_llm.kickoff(inputs={"ticker": "NVDA", "mode": "llm", "use_live": False})
+
+        assert flow_det.state.status == "SUCCESS"
+        assert flow_llm.state.status == "SUCCESS"
+
+        # 3. Verify exact mathematical equality down to the last decimal place
+        det_val = flow_det.state.valuation_output
+        llm_val = flow_llm.state.valuation_output
+
+        assert det_val.probability_weighted_intrinsic_value == llm_val.probability_weighted_intrinsic_value
+        assert det_val.implied_upside_pct == llm_val.implied_upside_pct
+        assert det_val.base_wacc == llm_val.base_wacc
+        assert det_val.reverse_dcf_implied_revenue_cagr == llm_val.reverse_dcf_implied_revenue_cagr
+
+        det_fsa = flow_det.state.fsa_summary
+        llm_fsa = flow_llm.state.fsa_summary
+        assert det_fsa.reconstructed_roe == llm_fsa.reconstructed_roe
+        assert det_fsa.roe == llm_fsa.roe
+
+        # 4. Verify numerical scenario drivers equality
+        for sc in ["bear", "base", "bull"]:
+            d_det = getattr(flow_det.state.dcf_assumptions, sc)
+            d_llm = getattr(flow_llm.state.dcf_assumptions, sc)
+            assert d_det.revenue_cagr_5yr == d_llm.revenue_cagr_5yr
+            assert d_det.target_ebit_margin_yr5 == d_llm.target_ebit_margin_yr5
+            assert d_det.effective_tax_rate == d_llm.effective_tax_rate
+            assert d_det.da_pct_revenue == d_llm.da_pct_revenue
+            assert d_det.capex_pct_revenue == d_llm.capex_pct_revenue
+            assert d_det.nwc_pct_revenue_change == d_llm.nwc_pct_revenue_change
+            assert d_det.terminal_growth_rate == d_llm.terminal_growth_rate
+            assert d_det.wacc_adjustment_bps == d_llm.wacc_adjustment_bps
+
+        # 5. Verify LLM-specific telemetry and qualitative outputs
+        assert flow_llm.state.llm_model_used.startswith("groq/")
+        assert flow_llm.state.llm_latency_ms > 0
+        assert len(flow_llm.state.dcf_assumptions.bull_thesis_points) == 3
+        assert len(flow_llm.state.dcf_assumptions.bear_thesis_points) == 3
+        assert len(flow_llm.state.dcf_assumptions.key_catalysts) == 3
+        assert len(flow_llm.state.dcf_assumptions.key_risks) == 3
+        assert all("[FILING-CHUNK-" in p for p in flow_llm.state.dcf_assumptions.bull_thesis_points)
+        assert all("[FILING-CHUNK-" in p for p in flow_llm.state.dcf_assumptions.bear_thesis_points)
+        assert "[FILING-CHUNK-" in flow_llm.state.dcf_assumptions.debate_synthesis_summary
+
+        # 6. Verify 3-Layer Eval Scorecard passed 100/100
+        assert flow_llm.state.eval_scorecard.passed is True
+        assert flow_llm.state.eval_scorecard.overall_eval_score == 100.0
+        assert len(flow_llm.state.eval_scorecard.flagged_discrepancies) == 0
+
+
+

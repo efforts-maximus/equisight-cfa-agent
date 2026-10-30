@@ -24,11 +24,14 @@ from src.schemas.models import (
     EvalScorecard,
 )
 from src.data.market_gateway import (
+    DataUnavailableError,
+    format_market_cap,
     fetch_company_snapshot,
     fetch_peer_multiples,
     OFFLINE_FIXTURES,
     OFFLINE_PEER_FIXTURES,
 )
+from src.data.ticker_resolver import resolve_ticker_query
 from src.data.filing_rag_tool import (
     load_filing_chunks,
     FilingRAGRetriever,
@@ -62,6 +65,13 @@ def test_company_financial_snapshot_ingestion(ticker, expected_curr, expected_un
     assert snapshot.market_cap > 0.0
     assert snapshot.enterprise_value > 0.0
     assert snapshot.high_52week >= snapshot.low_52week
+    assert snapshot.data_source == "AUDITED_OFFLINE_SNAPSHOT"
+
+    if ticker == "TCS.NS":
+        assert snapshot.market_cap > 1000000.0
+        assert snapshot.shares_outstanding == 361.81
+        assert snapshot.current_price == 3950.0
+        assert snapshot.market_cap == pytest.approx(1429149.5, abs=1e-1)
 
     # Verify 4 historical fiscal years: 2023, 2024, 2025, 2026
     assert len(snapshot.historical_years) == 4
@@ -662,17 +672,214 @@ def test_dual_mode_peer_multiples_with_cache(tmp_path):
     assert cached_peers[0].peer_ticker == peers[0].peer_ticker
 
 
-# ==============================================================================
+def test_dual_mode_default_signatures(tmp_path):
+    """Verifies that fetch_company_snapshot and fetch_peer_multiples default to use_live=True."""
+    # Calling without use_live argument should default to use_live=True
+    snap = fetch_company_snapshot("NVDA", cache_dir=tmp_path)
+    assert snap.ticker == "NVDA"
+    assert snap.data_source == "LIVE_YFINANCE"
+    assert snap.current_price > 150.0  # Real live price, not hardcoded $135 fixture
+
+    peers = fetch_peer_multiples("NVDA", cache_dir=tmp_path)
+    assert len(peers) == 3
+
+
+def test_cache_invalidation_stale_or_wrong_version(tmp_path):
+    """Verifies that pre-v3 or expired cache files are automatically ignored and overwritten."""
+    import json
+    import time
+    cache_file = tmp_path / "NVDA.json"
+
+    # Write a fake v2 cache file with old price
+    fake_data = {
+        "ticker": "NVDA",
+        "company_name": "NVIDIA",
+        "sector": "Technology",
+        "industry": "Semiconductors",
+        "currency": "USD",
+        "unit_label": "USD Millions",
+        "current_price": 50.0,
+        "shares_outstanding": 1000.0,
+        "market_cap": 50000.0,
+        "enterprise_value": 50000.0,
+        "high_52week": 60.0,
+        "low_52week": 40.0,
+        "benchmark_ticker": "^GSPC",
+        "risk_free_rate": 0.042,
+        "equity_risk_premium": 0.05,
+        "historical_years": [],
+        "daily_returns_stock": [],
+        "daily_returns_benchmark": [],
+        "business_summary": "Test",
+        "data_source": "LIVE_YFINANCE",
+        "cache_version": "v2_legacy",
+        "cached_at": time.time(),
+    }
+    with open(cache_file, "w", encoding="utf-8") as f:
+        json.dump(fake_data, f)
+
+    # Calling fetch should detect invalid cache_version, delete stale cache, and fetch live
+    snap = fetch_company_snapshot("NVDA", use_live=True, cache_dir=tmp_path)
+    assert snap.current_price > 150.0
+
+    # Verify newly written cache has v3_live_verified
+    with open(cache_file, "r", encoding="utf-8") as f:
+        new_cached = json.load(f)
+    assert new_cached["cache_version"] == "v3_live_verified"
+
+
+def test_dual_currency_ingestion_and_fx_conversion(tmp_path):
+    """Verifies that dual-currency filers (e.g. INFY.NS filing in USD, trading in INR) convert line items correctly."""
+    snap = fetch_company_snapshot("INFY.NS", use_live=True, cache_dir=tmp_path)
+    assert snap.currency == "INR"
+    assert snap.unit_label == "INR Crores"
+    assert snap.market_cap > 100000.0  # INFY market cap > 1 Lakh Cr
+    assert snap.shares_outstanding > 0.0
+    assert snap.market_cap == pytest.approx(snap.current_price * snap.shares_outstanding, abs=1e-1)
+
+    # Revenue should be in hundreds of thousands of Crores (~1.7+ Lakh Cr), NOT in single digit billions of USD
+    latest_yr = snap.historical_years[-1]
+    assert latest_yr.revenue > 100000.0, f"Expected INR Crores revenue > 100,000 Cr, got {latest_yr.revenue}"
+    assert latest_yr.capex >= 0.0  # Positive magnitude
+
+
+def test_exchange_aliases_live_retrieval(tmp_path):
+    """Verifies that tickers with exchange symbol renames (VARUNBEV.NS -> VBL.NS, ZOMATO.NS -> ETERNAL.NS) fetch live data."""
+    snap_vbl = fetch_company_snapshot("VARUNBEV.NS", use_live=True, cache_dir=tmp_path)
+    assert snap_vbl.ticker == "VARUNBEV.NS"
+    assert snap_vbl.data_source == "LIVE_YFINANCE"
+    assert snap_vbl.current_price > 0.0
+    assert snap_vbl.market_cap == pytest.approx(snap_vbl.current_price * snap_vbl.shares_outstanding, abs=1e-1)
+
+    snap_zomato = fetch_company_snapshot("ZOMATO.NS", use_live=True, cache_dir=tmp_path)
+    assert snap_zomato.ticker == "ZOMATO.NS"
+    assert snap_zomato.data_source == "LIVE_YFINANCE"
+    assert snap_zomato.current_price > 0.0
+    assert snap_zomato.market_cap == pytest.approx(snap_zomato.current_price * snap_zomato.shares_outstanding, abs=1e-1)
+
 # 9. ROBUSTNESS & EDGE CASE TESTS
 # ==============================================================================
 
 def test_market_gateway_unknown_ticker_errors():
-    """Negative tests: Unknown tickers raise KeyError / ValueError."""
-    with pytest.raises(KeyError):
+    """Negative tests: Unknown or invalid tickers raise DataUnavailableError instead of fake data."""
+    with pytest.raises(DataUnavailableError):
+        fetch_company_snapshot("INVALID_FAKE_TICKER_999", use_live=False)
+
+    with pytest.raises(DataUnavailableError):
+        fetch_company_snapshot("INVALID_FAKE_TICKER_999", use_live=True)
+
+    with pytest.raises(DataUnavailableError):
         fetch_company_snapshot("UNKNOWN_STOCK", use_live=False)
 
-    with pytest.raises(KeyError):
+    with pytest.raises(DataUnavailableError):
+        fetch_company_snapshot("FOOBAR", use_live=False)
+
+    with pytest.raises(DataUnavailableError):
+        fetch_peer_multiples("INVALID_FAKE_TICKER_999")
+
+    with pytest.raises(DataUnavailableError):
         fetch_peer_multiples("UNKNOWN_STOCK")
+
+    with pytest.raises(DataUnavailableError):
+        fetch_peer_multiples("FOOBAR")
+
+
+def test_market_gateway_bare_ticker_resolution():
+    """Verifies that bare Indian tickers and company names resolve cleanly in fetch functions."""
+    snap = fetch_company_snapshot("TCS", use_live=False)
+    assert snap.ticker == "TCS.NS"
+    assert snap.market_cap > 1000000.0
+    assert snap.data_source == "AUDITED_OFFLINE_SNAPSHOT"
+
+    snap_name = fetch_company_snapshot("Tata Consultancy", use_live=False)
+    assert snap_name.ticker == "TCS.NS"
+
+    peers = fetch_peer_multiples("TCS", use_live=False)
+    assert len(peers) == 3
+
+
+def test_parse_yfinance_snapshot_missing_statements_error():
+    """Negative tests: Missing core financial statements or rows must raise DataUnavailableError."""
+    from unittest.mock import MagicMock
+    from src.data.market_gateway import parse_yfinance_snapshot
+
+    mock_ticker = MagicMock()
+    mock_ticker.financials = None
+    mock_ticker.balance_sheet = None
+    mock_ticker.cashflow = None
+
+    # Missing statements entirely
+    with pytest.raises(DataUnavailableError) as exc_info:
+        parse_yfinance_snapshot("FAKE", mock_ticker, {"currentPrice": 100.0, "sharesOutstanding": 1000.0})
+    assert "Missing required financial statements" in str(exc_info.value)
+
+    # Missing price
+    with pytest.raises(DataUnavailableError) as exc_info:
+        parse_yfinance_snapshot("FAKE", mock_ticker, {"currentPrice": 0.0})
+    assert "No valid market price found" in str(exc_info.value)
+
+
+def test_ticker_resolver():
+    """Verifies that all 20 bare Indian tickers, 13 common names, and canonical symbols resolve correctly."""
+    # 20 Bare Indian Tickers mapped to .NS
+    bare_mappings = {
+        "TCS": "TCS.NS",
+        "INFY": "INFY.NS",
+        "RELIANCE": "RELIANCE.NS",
+        "VARUNBEV": "VARUNBEV.NS",
+        "VBL": "VARUNBEV.NS",
+        "ZOMATO": "ZOMATO.NS",
+        "ETERNAL": "ZOMATO.NS",
+        "HDFCBANK": "HDFCBANK.NS",
+        "ICICIBANK": "ICICIBANK.NS",
+        "SBIN": "SBIN.NS",
+        "ITC": "ITC.NS",
+        "WIPRO": "WIPRO.NS",
+        "HCLTECH": "HCLTECH.NS",
+        "LT": "LT.NS",
+        "BAJFINANCE": "BAJFINANCE.NS",
+        "BHARTIARTL": "BHARTIARTL.NS",
+        "MARUTI": "MARUTI.NS",
+        "TATAMOTORS": "TATAMOTORS.NS",
+        "SUNPHARMA": "SUNPHARMA.NS",
+        "TITAN": "TITAN.NS",
+    }
+    for bare, canonical in bare_mappings.items():
+        assert resolve_ticker_query(bare) == canonical, f"Bare ticker {bare} failed to resolve to {canonical}"
+
+    # 13 Common Company Names mapped to canonical symbols
+    name_mappings = {
+        "Tata Consultancy": "TCS.NS",
+        "Infosys": "INFY.NS",
+        "Reliance": "RELIANCE.NS",
+        "Varun Beverages": "VARUNBEV.NS",
+        "Zomato": "ZOMATO.NS",
+        "Eternal": "ZOMATO.NS",
+        "HDFC Bank": "HDFCBANK.NS",
+        "Nvidia": "NVDA",
+        "Apple": "AAPL",
+        "Microsoft": "MSFT",
+        "Tesla": "TSLA",
+        "Amazon": "AMZN",
+        "Alphabet": "GOOGL",
+    }
+    for name, canonical in name_mappings.items():
+        assert resolve_ticker_query(name) == canonical, f"Company name '{name}' failed to resolve to {canonical}"
+
+    # Negative test on completely bogus query
+    with pytest.raises(DataUnavailableError):
+        resolve_ticker_query("INVALID_FAKE_TICKER_999_NONEXISTENT_XYZ")
+
+
+def test_format_market_cap():
+    """Verifies market cap formatting according to institutional scale and currency."""
+    assert format_market_cap(1429149.5, "INR") == "₹14.29 Lakh Cr"
+    assert format_market_cap(138580.0, "INR") == "₹1.39 Lakh Cr"
+    assert format_market_cap(239200.0, "INR") == "₹2.39 Lakh Cr"
+    assert format_market_cap(3260250.0, "USD") == "$3.26T"
+    assert format_market_cap(150000.0, "USD") == "$150.00B"
+    assert format_market_cap(500.0, "USD") == "$500.00M"
+
 
 
 def test_filing_chunks_case_insensitivity():
@@ -700,4 +907,80 @@ def test_filing_rag_retriever_empty_query():
     evidence = query_filing_evidence("TCS.NS", "", top_k=2)
     assert "[FILING-CHUNK-1]" in evidence
     assert "(Score: 0.0000)" in evidence
+
+
+# ==============================================================================
+# 10. DAILY MARKET MOVERS & TRENDING STOCKS TESTS (market_pulse.py)
+# ==============================================================================
+
+def test_market_pulse_trending_stock_card_schema():
+    """Verifies that TrendingStockCard model correctly instantiates and validates fields."""
+    from src.data.market_pulse import TrendingStockCard
+
+    card = TrendingStockCard(
+        ticker="NVDA",
+        company_name="NVIDIA Corporation",
+        market="US",
+        current_price=210.96,
+        currency="USD",
+        daily_change_pct=2.45,
+        daily_volume=79987200,
+        market_cap=5094051.0,
+        formatted_market_cap="$5.09T",
+    )
+    assert card.ticker == "NVDA"
+    assert card.market == "US"
+    assert card.currency == "USD"
+    assert card.current_price > 0.0
+    assert card.daily_change_pct == 2.45
+    assert card.formatted_market_cap == "$5.09T"
+
+
+def test_market_pulse_fetch_popular_stocks_live():
+    """Verifies live popular stocks fetching across US, NSE, and ALL markets."""
+    from src.data.market_pulse import fetch_daily_popular_stocks, TrendingStockCard
+
+    # Test ALL filter
+    cards, is_live, msg = fetch_daily_popular_stocks(market_filter="ALL", max_items=4)
+    if is_live:
+        assert len(cards) <= 4
+        assert len(cards) > 0
+        assert "Live Yahoo Finance" in msg
+        for c in cards:
+            assert isinstance(c, TrendingStockCard)
+            assert c.current_price > 0.0
+            assert c.currency in ("USD", "INR")
+            assert c.market in ("US", "NSE")
+    else:
+        # If network unavailable, must return 0 fabricated numbers and explicit offline message
+        assert cards == []
+        assert "Offline mode" in msg
+
+    # Test US filter
+    cards_us, is_live_us, _ = fetch_daily_popular_stocks(market_filter="US", max_items=2)
+    if is_live_us:
+        for c in cards_us:
+            assert c.market == "US"
+            assert c.currency == "USD"
+
+    # Test NSE filter
+    cards_nse, is_live_nse, _ = fetch_daily_popular_stocks(market_filter="NSE", max_items=2)
+    if is_live_nse:
+        for c in cards_nse:
+            assert c.market == "NSE"
+            assert c.currency == "INR"
+
+
+def test_market_pulse_offline_fallback_zero_fabrication():
+    """Verifies that when Yahoo Finance is unreachable, returns is_live=False, empty list, and zero fabricated numbers."""
+    from unittest.mock import patch
+    from src.data.market_pulse import fetch_daily_popular_stocks
+
+    with patch("yfinance.Ticker", side_effect=RuntimeError("Connection refused by Yahoo")):
+        cards, is_live, msg = fetch_daily_popular_stocks(market_filter="ALL", max_items=8)
+        assert cards == []
+        assert is_live is False
+        assert "Offline mode: Live market data unavailable" in msg
+        assert "zero fabricated numbers" in msg or "does not fabricate synthetic market movers" in msg
+
 

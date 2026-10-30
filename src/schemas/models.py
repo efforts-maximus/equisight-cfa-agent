@@ -63,6 +63,10 @@ class CompanyFinancialSnapshot(BaseModel):
     daily_returns_stock: list[float] = Field(description="Daily return series for stock (last 252 trading days)")
     daily_returns_benchmark: list[float] = Field(description="Daily return series for benchmark index (last 252 trading days)")
     business_summary: str = Field(description="Overview of business model, core segments, and geographic footprint")
+    data_source: str = Field(
+        default="AUDITED_OFFLINE_SNAPSHOT",
+        description="Origin of data: LIVE_YFINANCE or AUDITED_OFFLINE_SNAPSHOT",
+    )
 
     @model_validator(mode="after")
     def validate_snapshot_invariants(self) -> "CompanyFinancialSnapshot":

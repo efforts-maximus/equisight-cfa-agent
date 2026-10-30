@@ -537,3 +537,135 @@ def test_fsa_revenue_cagr_negative_revenue_safety():
     assert isinstance(fsa.revenue_cagr_3yr, float)
     assert fsa.revenue_cagr_3yr == 0.0
 
+
+def test_cfa_h_model_blended_terminal_value_properties():
+    """Verifies that compute_blended_terminal_value satisfies CFA Level 1 mathematical properties."""
+    from src.engines.valuation_engine import compute_blended_terminal_value
+
+    tv, tv_h, tv_exit = compute_blended_terminal_value(
+        terminal_fcff=100.0,
+        ebitda_5=200.0,
+        avg_5yr_cagr=0.15,
+        g=0.03,
+        wacc=0.09,
+        roic=0.25,
+        op_margin=0.20,
+        current_multiple=20.0,
+    )
+    assert tv > 0.0
+    assert tv_h > 0.0
+    assert tv_exit > 0.0
+    assert abs(tv - (0.50 * tv_h + 0.50 * tv_exit)) < 1e-5
+
+    # High excess return company has higher H and higher terminal value
+    _, tv_h_high_roic, _ = compute_blended_terminal_value(
+        terminal_fcff=100.0,
+        ebitda_5=200.0,
+        avg_5yr_cagr=0.15,
+        g=0.03,
+        wacc=0.09,
+        roic=0.80,
+        op_margin=0.35,
+        current_multiple=20.0,
+    )
+    assert tv_h_high_roic > tv_h
+
+
+def test_aapl_valuation_no_artificial_cliff():
+    """Verifies that high-ROIC compounder AAPL avoids the artificial -44% Gordon Growth cliff."""
+    from src.agents.research_flow import synthesize_deterministic_assumptions
+
+    snapshot = fetch_company_snapshot("AAPL", use_live=True)
+    fsa = compute_fsa_summary(snapshot)
+    quant = compute_quant_risk_summary(snapshot)
+    assumptions = synthesize_deterministic_assumptions(snapshot, fsa, quant)
+    val = run_valuation_suite(snapshot, assumptions, quant, [])
+
+    # Intrinsic value per share should not crash by 40%+
+    assert val.implied_upside_pct > -0.25, (
+        f"AAPL suffered an unrealistic valuation cliff: upside={val.implied_upside_pct*100:.2f}%, "
+        f"target={val.probability_weighted_intrinsic_value:.2f}, current={snapshot.current_price:.2f}"
+    )
+    assert val.probability_weighted_intrinsic_value > 250.0
+
+
+def test_buyback_compounder_negative_invested_capital_handling():
+    """Verifies that buyback compounders with negative invested capital use operating capital without error."""
+    from src.schemas.models import CompanyFinancialSnapshot
+    from src.agents.research_flow import synthesize_deterministic_assumptions
+    import numpy as np
+
+    base_snap = fetch_company_snapshot("NVDA", use_live=False)
+    snap_dict = base_snap.model_dump()
+    snap_dict["ticker"] = "BUYBACK_CORP"
+    snap_dict["company_name"] = "Buyback Compounder Corp"
+
+    for yr in snap_dict["historical_years"]:
+        yr["total_equity"] = -5000.0
+        yr["total_debt"] = 1000.0
+        yr["cash_and_equivalents"] = 2000.0
+        yr["total_assets"] = 8000.0
+        yr["current_liabilities"] = 3000.0
+        yr["ebit"] = 1500.0
+
+    snap = CompanyFinancialSnapshot(**snap_dict)
+    fsa = compute_fsa_summary(snap)
+    quant = compute_quant_risk_summary(snap)
+    assumptions = synthesize_deterministic_assumptions(snap, fsa, quant)
+    val = run_valuation_suite(snap, assumptions, quant, [])
+
+    assert val.probability_weighted_intrinsic_value > 0.0
+    assert val.reverse_dcf_implied_revenue_cagr is not None
+
+    # Verify sensitivity matrix monotonicity
+    w_steps, g_steps, mat = compute_sensitivity_matrix(snap, assumptions.base, val.base_wacc, assumptions.base.terminal_growth_rate)
+    mat_arr = np.array(mat)
+    assert np.all(np.diff(mat_arr, axis=1) > 0)
+    assert np.all(np.diff(mat_arr, axis=0) < 0)
+
+
+def test_distressed_negative_ebit_no_excess_roic():
+    """Verifies that distressed companies with negative EBIT receive zero excess ROIC."""
+    from src.schemas.models import CompanyFinancialSnapshot
+    from src.agents.research_flow import synthesize_deterministic_assumptions
+
+    base_snap = fetch_company_snapshot("NVDA", use_live=False)
+    snap_dict = base_snap.model_dump()
+    snap_dict["ticker"] = "DISTRESSED_CORP"
+    snap_dict["company_name"] = "Distressed Unprofitable Corp"
+
+    for yr in snap_dict["historical_years"]:
+        yr["ebit"] = -500.0
+        yr["ebitda"] = -200.0
+        yr["operating_cash_flow"] = -400.0
+        yr["net_income"] = -600.0
+
+    snap = CompanyFinancialSnapshot(**snap_dict)
+    fsa = compute_fsa_summary(snap)
+    quant = compute_quant_risk_summary(snap)
+    assumptions = synthesize_deterministic_assumptions(snap, fsa, quant)
+    res = compute_single_dcf(snap, assumptions.base, quant.adjusted_beta)
+
+    # Intrinsic value should be valid and bounded
+    assert res.intrinsic_value_per_share >= 0.01
+    assert res.terminal_value >= 0.0
+
+
+def test_reverse_dcf_roundtrip_precision_all_benchmarks():
+    """Verifies that solve_reverse_dcf_cagr recovers the market price within 0.05% across benchmark fixtures."""
+    from src.agents.research_flow import synthesize_deterministic_assumptions
+
+    for ticker in ["NVDA", "TCS.NS", "VARUNBEV.NS", "ZOMATO.NS"]:
+        snapshot = fetch_company_snapshot(ticker, use_live=False)
+        fsa = compute_fsa_summary(snapshot)
+        quant = compute_quant_risk_summary(snapshot)
+        assumptions = synthesize_deterministic_assumptions(snapshot, fsa, quant)
+        cagr = solve_reverse_dcf_cagr(snapshot, assumptions.base, quant.adjusted_beta)
+
+        test_driver = assumptions.base.model_copy(update={"revenue_cagr_5yr": [cagr] * 5})
+        dcf_res = compute_single_dcf(snapshot, test_driver, quant.adjusted_beta)
+        err = abs(dcf_res.intrinsic_value_per_share - float(snapshot.current_price)) / float(snapshot.current_price)
+        assert err < 0.0005, f"{ticker} Reverse-DCF recovery error {err * 100:.3f}% exceeds 0.05%"
+
+
+

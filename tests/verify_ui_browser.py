@@ -10,6 +10,11 @@ import time
 from pathlib import Path
 from playwright.sync_api import sync_playwright
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 OUTPUTS_DIR = Path("outputs") / "screenshots"
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -24,7 +29,7 @@ def find_chrome_executable() -> str | None:
 
 
 def verify_dashboard_browser(url: str = "http://localhost:8501", max_retries: int = 15) -> bool:
-    """Visits the Streamlit application and asserts zero exceptions across all 5 tabs."""
+    """Visits the Streamlit application and asserts zero exceptions across Home and all 5 Deep-Dive tabs."""
     print(f"[*] Starting Playwright browser verification for {url}...")
     chrome_bin = find_chrome_executable()
     if chrome_bin:
@@ -55,12 +60,9 @@ def verify_dashboard_browser(url: str = "http://localhost:8501", max_retries: in
             browser.close()
             return False
 
-        # Wait for Streamlit app container and tabs to be rendered
+        # Wait for Streamlit app container to render
         page.wait_for_selector(".stApp", timeout=30000)
-        print("[*] Waiting for initial pipeline execution to complete and tabs to render...")
-        page.wait_for_selector('div[data-testid="stTabs"]', timeout=60000)
-        page.wait_for_selector('.js-plotly-plot', timeout=30000)
-        time.sleep(3)  # Allow charts to stabilize
+        time.sleep(3)  # Allow initial UI rendering to settle
 
         # Check for initial exceptions
         exceptions = page.locator(".stException")
@@ -70,6 +72,37 @@ def verify_dashboard_browser(url: str = "http://localhost:8501", max_retries: in
                 print(f"    - Error {i+1}: {exceptions.nth(i).inner_text()}", file=sys.stderr)
             browser.close()
             return False
+
+        # 1. Verify 🏠 Command Center (Home) Landing Page
+        print("[*] Verifying Command Center (Home) Landing Page...")
+        page.wait_for_selector('button:has-text("MCap")', timeout=30000)
+        time.sleep(2)
+
+        # Capture Command Center Home screenshot
+        home_screenshot = OUTPUTS_DIR / "home_command_center.png"
+        page.screenshot(path=str(home_screenshot), full_page=True)
+        print(f"[+] Screenshot captured: {home_screenshot}")
+
+        # Assert zero exceptions on Home page
+        exc_count = page.locator(".stException").count()
+        if exc_count > 0:
+            print(f"[!] Found {exc_count} exception(s) on Command Center Home!", file=sys.stderr)
+            browser.close()
+            return False
+
+        # 2. Switch to Deep-Dive Research Terminal via clicking a Live Market Mover Card
+        print("[*] Clicking Live Market Mover card to enter Deep-Dive Research Terminal...")
+        mover_cards = page.locator('button:has-text("MCap")')
+        if mover_cards.count() > 0:
+            mover_cards.first.click()
+        else:
+            terminal_radio = page.locator('div[data-testid="stRadio"] label:has-text("Deep-Dive")')
+            terminal_radio.click()
+
+        print("[*] Waiting for Deep-Dive Research Terminal tabs and Plotly charts to render...")
+        page.wait_for_selector('div[data-testid="stTabs"]', timeout=60000)
+        page.wait_for_selector('.js-plotly-plot', timeout=30000)
+        time.sleep(3)
 
         # Tab definitions and screenshot file targets
         tabs_to_verify = [
@@ -98,11 +131,12 @@ def verify_dashboard_browser(url: str = "http://localhost:8501", max_retries: in
                 browser.close()
                 return False
 
-            # Capture screenshot
-            page.screenshot(path=str(screenshot_path), full_page=False)
+            # Capture screenshot with full page content
+            time.sleep(1.0)
+            page.screenshot(path=str(screenshot_path), full_page=True)
             print(f"[+] Screenshot captured: {screenshot_path}")
 
-        print("[+] All 5 Streamlit tabs verified successfully with 0 runtime errors.")
+        print("[+] Command Center Home and all 5 Streamlit tabs verified successfully with 0 runtime errors.")
         browser.close()
         return True
 

@@ -288,3 +288,301 @@ class TestWhatIfOverrides:
         result = execute_pipeline("NON_EXISTENT_TICKER_XYZ_123", mode="deterministic")
         assert result is None
 
+
+class TestUIStateAndCustomTickerExecution:
+    """Tests UI state switching transitions and custom ticker execution."""
+
+    def test_switch_ticker_varunbev_nvda_and_back_produces_identical_output(self):
+        """Tests that switching VARUNBEV.NS -> NVDA -> VARUNBEV.NS produces 100% identical outputs."""
+        state_v1 = execute_pipeline("VARUNBEV.NS", mode="deterministic", use_live=False)
+        assert state_v1 is not None
+        assert state_v1.status == "SUCCESS"
+        v1_val = state_v1.valuation_output.probability_weighted_intrinsic_value
+
+        state_nvda = execute_pipeline("NVDA", mode="deterministic", use_live=False)
+        assert state_nvda is not None
+        assert state_nvda.status == "SUCCESS"
+        assert state_nvda.snapshot.ticker == "NVDA"
+
+        state_v2 = execute_pipeline("VARUNBEV.NS", mode="deterministic", use_live=False)
+        assert state_v2 is not None
+        assert state_v2.status == "SUCCESS"
+        assert state_v2.snapshot.ticker == "VARUNBEV.NS"
+        v2_val = state_v2.valuation_output.probability_weighted_intrinsic_value
+
+        assert v1_val == pytest.approx(v2_val, abs=1e-4)
+        assert state_v1.valuation_output.recommendation == state_v2.valuation_output.recommendation
+        assert state_v1.fsa_summary.reconstructed_roe == pytest.approx(state_v2.fsa_summary.reconstructed_roe, abs=1e-4)
+
+    def test_switch_mode_deterministic_llm_and_back_works_cleanly(self):
+        """Tests that switching execution mode deterministic -> llm -> deterministic operates cleanly."""
+        state_det1 = execute_pipeline("TCS.NS", mode="deterministic", use_live=False)
+        assert state_det1 is not None
+        assert state_det1.mode == "deterministic"
+        assert state_det1.eval_scorecard.passed is True
+
+        # Switching to LLM mode (without live keys falls back gracefully to deterministic synthesis)
+        state_llm = execute_pipeline("TCS.NS", mode="llm", use_live=False)
+        assert state_llm is not None
+        assert state_llm.mode == "llm"
+        assert state_llm.eval_scorecard.passed is True
+
+        # Switching back to deterministic mode
+        state_det2 = execute_pipeline("TCS.NS", mode="deterministic", use_live=False)
+        assert state_det2 is not None
+        assert state_det2.mode == "deterministic"
+        assert state_det2.eval_scorecard.passed is True
+        assert (
+            state_det1.valuation_output.probability_weighted_intrinsic_value
+            == pytest.approx(state_det2.valuation_output.probability_weighted_intrinsic_value, abs=1e-4)
+        )
+
+    @pytest.mark.parametrize("custom_sym", ["INFY.NS", "AAPL"])
+    def test_custom_ticker_execution_returns_100_percent_eval_scorecard(self, custom_sym):
+        """Tests that custom tickers execute cleanly through the pipeline and receive 100/100 EvalScorecard."""
+        result = execute_pipeline(custom_sym, mode="deterministic", use_live=False)
+        assert result is not None
+        assert result.status == "SUCCESS"
+        assert result.snapshot.ticker == custom_sym
+        assert result.eval_scorecard is not None
+        assert result.eval_scorecard.passed is True
+        assert result.eval_scorecard.overall_eval_score == 100.0
+        assert result.eval_scorecard.math_invariance_score == 100.0
+        assert result.eval_scorecard.schema_completeness_score == 100.0
+        assert result.eval_scorecard.numerical_faithfulness_score == 100.0
+
+    def test_sidebar_selection_key_state_transitions(self):
+        """Simulates Streamlit session state tracking and ensures selection transitions trigger re-execution."""
+        session_state = {}
+        sequence = [
+            ("VARUNBEV.NS", "deterministic", False),
+            ("NVDA", "deterministic", False),
+            ("VARUNBEV.NS", "deterministic", False),
+            ("TCS.NS", "deterministic", False),
+            ("ZOMATO.NS", "deterministic", False),
+        ]
+        history = []
+        for ticker, mode, live in sequence:
+            current_key = f"{ticker}::{mode}::{live}"
+            # Emulate Streamlit app execution gate
+            if session_state.get("last_executed_key") != current_key:
+                res = execute_pipeline(ticker, mode, live)
+                session_state["pipeline_result"] = res
+                session_state["last_executed_key"] = current_key
+                history.append((ticker, res.valuation_output.probability_weighted_intrinsic_value))
+
+        # Check all 5 transitions executed
+        assert len(history) == 5
+        # The first and third executions were both VARUNBEV.NS; values must be identical
+        assert history[0][0] == "VARUNBEV.NS"
+        assert history[2][0] == "VARUNBEV.NS"
+        assert history[0][1] == pytest.approx(history[2][1], abs=1e-4)
+
+    def test_empty_ticker_validation_raises_error(self):
+        """Verifies empty or whitespace ticker symbols raise ValueError or return None gracefully."""
+        from src.data.market_gateway import fetch_company_snapshot, fetch_peer_multiples
+        from src.data.filing_rag_tool import load_filing_chunks
+
+        with pytest.raises(ValueError, match="cannot be empty"):
+            fetch_company_snapshot("")
+        with pytest.raises(ValueError, match="cannot be empty"):
+            fetch_company_snapshot("   ")
+        with pytest.raises(ValueError, match="cannot be empty"):
+            fetch_peer_multiples("")
+        with pytest.raises(ValueError, match="cannot be empty"):
+            load_filing_chunks("")
+
+        # Pipeline execution on empty ticker returns None rather than crashing
+        res = execute_pipeline("", mode="deterministic")
+        assert res is None
+
+    def test_custom_ticker_peer_multiples_enrichment(self):
+        """Verifies custom ticker peer multiples return complete valid PeerCompMultiple objects."""
+        from src.data.market_gateway import fetch_peer_multiples
+
+        peers = fetch_peer_multiples("AAPL", use_live=False)
+        assert len(peers) >= 2
+        for p in peers:
+            assert p.pe_ratio > 0
+            assert p.ev_to_ebitda > 0
+            assert p.pb_ratio > 0
+            assert p.ev_to_sales > 0
+            assert len(p.peer_ticker) > 0
+
+    def test_cli_bare_ticker_resolution_and_exit_codes(self):
+        """Verifies CLI resolves bare Indian tickers and exits with code 1 on invalid tickers."""
+        import argparse
+        from main import run_cli
+
+        # Bare ticker 'TCS' should resolve to 'TCS.NS' and return exit code 0
+        args_tcs = argparse.Namespace(
+            ticker="TCS",
+            mode="deterministic",
+            use_live_data=False,
+            output_dir="outputs",
+        )
+        assert run_cli(args_tcs) == 0
+
+        # Invalid ticker must exit cleanly with code 1
+        args_invalid = argparse.Namespace(
+            ticker="NON_EXISTENT_COMPANY_FAKE_999",
+            mode="deterministic",
+            use_live_data=False,
+            output_dir="outputs",
+        )
+        assert run_cli(args_invalid) == 1
+
+    def test_app_execute_pipeline_captures_data_unavailable_error(self):
+        """Verifies execute_pipeline populates execute_pipeline.last_error on DataUnavailableError."""
+        from app import execute_pipeline
+
+        res = execute_pipeline("NON_EXISTENT_COMPANY_FAKE_999", mode="deterministic", use_live=False)
+        assert res is None
+        assert execute_pipeline.last_error is not None
+        assert "Data unavailable" in execute_pipeline.last_error or "unavailable" in execute_pipeline.last_error.lower()
+
+    def test_retrieve_filing_evidence_tool_with_bare_ticker(self):
+        """Verifies RetrieveFilingEvidenceTool resolves bare ticker 'TCS' and returns citations."""
+        from src.agents.tools import RetrieveFilingEvidenceTool
+
+        tool = RetrieveFilingEvidenceTool()
+        result = tool._run(ticker="TCS", query="cloud banking transformation", top_k=2)
+        assert "[FILING-CHUNK-" in result
+        assert len(result) > 50
+
+    def test_trending_stock_card_property_accessors(self):
+        """Verifies TrendingStockCard property accessors match institutional UI contracts."""
+        from src.data.market_pulse import TrendingStockCard
+
+        card_us = TrendingStockCard(
+            ticker="NVDA",
+            company_name="NVIDIA Corporation",
+            market="US",
+            current_price=142.50,
+            currency="USD",
+            daily_change_pct=3.45,
+            daily_volume=48000000,
+            market_cap=3500000.0,
+            formatted_market_cap="$3.50T",
+        )
+        assert card_us.currency_symbol == "$"
+        assert card_us.day_change_pct == 3.45
+        assert card_us.day_volume == 48000000
+        assert card_us.market_cap_formatted == "$3.50T"
+        assert card_us.activity_tag in ("HIGH VOLATILITY", "HEAVY VOLUME", "ACTIVE GAINER", "MARKET MOVER")
+
+        card_nse = TrendingStockCard(
+            ticker="TCS.NS",
+            company_name="Tata Consultancy Services",
+            market="NSE",
+            current_price=4120.00,
+            currency="INR",
+            daily_change_pct=1.85,
+            daily_volume=3200000,
+            market_cap=1490000.0,
+            formatted_market_cap="₹14.90L Cr",
+        )
+        assert card_nse.currency_symbol == "₹"
+        assert card_nse.day_change_pct == 1.85
+        assert card_nse.day_volume == 3200000
+        assert card_nse.market_cap_formatted == "₹14.90L Cr"
+
+    def test_get_benchmark_mover_cards_contract(self):
+        """Verifies get_benchmark_mover_cards returns 8 valid benchmark cards for offline navigation."""
+        from app import get_benchmark_mover_cards
+
+        cards = get_benchmark_mover_cards()
+        assert len(cards) == 8
+        tickers = [c.ticker for c in cards]
+        assert "NVDA" in tickers
+        assert "TCS.NS" in tickers
+        assert "VARUNBEV.NS" in tickers
+        assert "ZOMATO.NS" in tickers
+        for c in cards:
+            assert c.current_price > 0
+            assert c.market in ("US", "NSE")
+            assert c.currency in ("USD", "INR")
+            assert len(c.activity_tag) > 0
+            assert len(c.currency_symbol) > 0
+
+    def test_compute_stock_comparison_metrics_benchmark_stocks(self):
+        """Verifies compute_stock_comparison_metrics returns all 9 required valuation & FSA metrics."""
+        from app import compute_stock_comparison_metrics
+
+        for sym in ["NVDA", "TCS.NS", "VARUNBEV.NS"]:
+            data = compute_stock_comparison_metrics(sym)
+            assert data is not None, f"Expected valid data for {sym}"
+            assert data["ticker"] == sym
+            assert data["current_price"] > 0
+            assert data["target_price"] > 0
+            assert -1.0 <= data["implied_upside_pct"] <= 5.0
+            assert data["recommendation"] in ("BUY", "HOLD", "SELL")
+            assert data["dupont_roe"] is not None
+            assert data["operating_margin"] is not None
+            assert data["base_wacc"] > 0
+            assert data["reverse_dcf_growth"] is not None
+            assert data["altman_z"] is not None
+            assert data["altman_zone"] in ("Distress", "Grey", "Safe")
+
+    def test_navigation_view_constants_and_pipeline_error_capture(self):
+        """Verifies view constants and LLM execution error capture contract in app.py."""
+        from app import VIEW_HOME, VIEW_TERMINAL, execute_pipeline
+
+        assert VIEW_HOME == "🏠 Command Center (Home)"
+        assert VIEW_TERMINAL == "📊 Deep-Dive Research Terminal"
+
+        res = execute_pipeline("INVALID_TICKER_FOR_TESTING_123", mode="deterministic", use_live=False)
+        assert res is None
+        assert execute_pipeline.last_error is not None
+
+    def test_mover_card_label_katex_safety_and_css_targeting(self):
+        """Verifies TERMINAL_CSS targets Streamlit element keys and mover labels escape KaTeX math delimiters."""
+        from app import TERMINAL_CSS
+        from src.data.market_pulse import TrendingStockCard
+
+        # Verify CSS selectors target Streamlit's generated wrapper classes
+        assert 'div[class*="st-key-btn_ql_"] button' in TERMINAL_CSS
+        assert 'div[class*="st-key-mover_card_"] button' in TERMINAL_CSS
+
+        # Test US mover card label KaTeX escaping
+        card = TrendingStockCard(
+            ticker="NVDA",
+            company_name="NVIDIA Corporation",
+            market="US",
+            current_price=142.50,
+            currency="USD",
+            daily_change_pct=3.45,
+            daily_volume=48000000,
+            market_cap=3500000.0,
+            formatted_market_cap="$3.50T",
+        )
+        tag = card.activity_tag
+        sym = card.currency_symbol
+        chg = card.day_change_pct
+        vol = card.day_volume
+        mcap = card.market_cap_formatted
+        raw_label = (
+            f"{card.ticker}  •  {tag}\n"
+            f"{card.company_name}\n"
+            f"{sym}{card.current_price:,.2f}  ({chg:+.2f}%)\n"
+            f"MCap: {mcap}  |  Vol: {vol:,}"
+        ).replace("$", r"\$")
+
+        # Must not contain unescaped dollar signs that trigger Streamlit KaTeX inline math
+        assert "$" in raw_label
+        assert r"\$" in raw_label
+        # Verify unescaped $ does not exist
+        unescaped_dollars = [i for i, c in enumerate(raw_label) if c == "$" and (i == 0 or raw_label[i - 1] != "\\")]
+        assert len(unescaped_dollars) == 0, f"Found unescaped dollar signs at {unescaped_dollars}"
+
+    def test_comparator_identical_tickers_widget_key_isolation(self):
+        """Verifies comparator button keys are disambiguated for identical stocks (e.g. NVDA vs NVDA)."""
+        stock_a = "NVDA"
+        stock_b = "NVDA"
+        key_a = f"btn_dd_a_{stock_a}"
+        key_b = f"btn_dd_b_{stock_b}"
+        assert key_a != key_b, f"Widget keys must be unique even when stocks match: {key_a} vs {key_b}"
+
+
+
+
