@@ -2,12 +2,12 @@
 
 ## Investment Overview: Tata Consultancy Services Limited (TCS.NS)
 - **Initiating Coverage Recommendation:** HOLD
-- **Current Price:** INR 2510.60
-- **Target Price:** INR 2734.72
-- **Implied Upside:** 8.93%
+- **Current Price:** INR 2502.60
+- **Target Price:** INR 2733.53
+- **Implied Upside:** 9.23%
 - **Base WACC:** 12.10%
-- **Market Capitalization:** INR 908360.19 INR Crores
-- **Enterprise Value:** INR 878270.19 INR Crores
+- **Market Capitalization:** INR 905465.71 INR Crores
+- **Enterprise Value:** INR 875375.71 INR Crores
 - **52-Week Range:** INR 1976.80 - 3350.00
 
 ### Executive Business Profile & Moat Summary
@@ -45,7 +45,7 @@ Tata Consultancy Services Limited provides information technology (IT) and IT en
 # 3. Forensic Earnings Quality & Solvency
 
 ## Solvency & Bankruptcy Risk Assessment
-- **Altman Z-Score:** 11.31 (Zone: **Safe**)
+- **Altman Z-Score:** 11.28 (Zone: **Safe**)
 - **Debt-to-Equity:** 0.10x
 - **Net Debt to EBITDA:** -0.42x
 - **Interest Coverage:** 54.37x
@@ -93,38 +93,38 @@ While operational risks, supply chain dependencies, and regulatory headwinds cit
 | Terminal Year 5 Margin | 25.6% | 27.0% | 28.3% |
 | WACC | 12.45% | 12.10% | 11.75% |
 | Terminal Growth Rate | 4.25% | 4.50% | 4.75% |
-| Enterprise Value | INR 760652.44 | INR 942727.00 | INR 1191334.79 |
-| Equity Value | INR 790742.44 | INR 972817.00 | INR 1221424.79 |
-| Intrinsic Value / Share | INR 2185.52 | INR 2688.75 | INR 3375.87 |
-| Upside / Downside | -12.95% | +7.10% | +34.46% |
+| Enterprise Value | INR 760217.82 | INR 942283.88 | INR 1190916.04 |
+| Equity Value | INR 790307.82 | INR 972373.88 | INR 1221006.04 |
+| Intrinsic Value / Share | INR 2184.32 | INR 2687.53 | INR 3374.72 |
+| Upside / Downside | -12.72% | +7.39% | +34.85% |
 
-- **Probability-Weighted Intrinsic Value:** INR 2734.72
-- **Reverse-DCF Implied 5-Yr Revenue CAGR:** 5.33%
-- **Market Expectations Gap:** +93.3 bps vs. Base CAGR
-- **Peer Median Implied Relative Price:** INR 2292.74
+- **Probability-Weighted Intrinsic Value:** INR 2733.53
+- **Reverse-DCF Implied 5-Yr Revenue CAGR:** 5.28%
+- **Market Expectations Gap:** +97.5 bps vs. Base CAGR
+- **Peer Median Implied Relative Price:** INR 2342.21
 
 ---
 
 # 6. Quantitative Risk & Monte Carlo Simulation
 
 ## Benchmark Linear Regression & Volatility Risk
-- **OLS Beta:** 0.838
-- **Blume Adjusted Beta:** 0.892
-- **Annualized Jensen's Alpha:** -1.58%
-- **R-Squared:** 0.1468
-- **Annualized Volatility:** 30.16%
+- **OLS Beta:** 0.837
+- **Blume Adjusted Beta:** 0.891
+- **Annualized Jensen's Alpha:** -1.77%
+- **R-Squared:** 0.1464
+- **Annualized Volatility:** 30.15%
 - **Downside Deviation:** 21.59%
-- **Sharpe Ratio:** -0.56
-- **Sortino Ratio:** -0.78
+- **Sharpe Ratio:** -0.57
+- **Sortino Ratio:** -0.79
 - **Maximum Drawdown:** 38.46%
 - **95% Daily VaR (Parametric):** 3.17%
 - **95% Daily CVaR (Expected Shortfall):** 4.43%
 
 ## 10,000-Path Monte Carlo Simulation Distribution
-- **Mean Simulated Price:** INR 2751.64
-- **P5 (95% Value-at-Risk Floor):** INR 2146.39
-- **P25 (First Quartile):** INR 2441.33
-- **P50 (Median Intrinsic Value):** INR 2699.16
-- **P75 (Third Quartile):** INR 3004.46
-- **P95 (Upper Bound):** INR 3523.21
-- **Probability of Positive Upside:** 68.5%
+- **Mean Simulated Price:** INR 2750.45
+- **P5 (95% Value-at-Risk Floor):** INR 2145.28
+- **P25 (First Quartile):** INR 2440.20
+- **P50 (Median Intrinsic Value):** INR 2697.84
+- **P75 (Third Quartile):** INR 3003.27
+- **P95 (Upper Bound):** INR 3521.90
+- **Probability of Positive Upside:** 69.1%

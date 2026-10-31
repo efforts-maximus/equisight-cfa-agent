@@ -583,6 +583,28 @@ class TestUIStateAndCustomTickerExecution:
         key_b = f"btn_dd_b_{stock_b}"
         assert key_a != key_b, f"Widget keys must be unique even when stocks match: {key_a} vs {key_b}"
 
+    def test_sidebar_toggle_css_preservation(self):
+        """Verifies TERMINAL_CSS does not hide stHeader and preserves sidebar toggle controls."""
+        from app import TERMINAL_CSS
+
+        # Streamlit chrome (Deploy button, hamburger menu) must be hidden
+        assert '[data-testid="stAppDeployButton"]' in TERMINAL_CSS
+        assert '#MainMenu' in TERMINAL_CSS
+
+        # header[data-testid="stHeader"] must NOT be hidden completely
+        assert 'header[data-testid="stHeader"] {\n        display: none' not in TERMINAL_CSS
+        assert 'header[data-testid="stHeader"],' not in TERMINAL_CSS
+
+        # Sidebar toggle controls must have pointer-events and visibility preserved
+        assert '[data-testid="stExpandSidebarButton"]' in TERMINAL_CSS
+        assert '[data-testid="stSidebarCollapseButton"]' in TERMINAL_CSS
+        assert 'pointer-events: auto' in TERMINAL_CSS
+        assert 'button[aria-label="Expand sidebar"]' in TERMINAL_CSS
+        assert 'button[aria-label="Collapse sidebar"]' in TERMINAL_CSS
+        assert 'color: #c9d1d9' in TERMINAL_CSS
+        assert 'background-color: #161b22' in TERMINAL_CSS
+
+
 
 
 

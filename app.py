@@ -58,28 +58,102 @@ VIEW_TERMINAL = "📊 Deep-Dive Research Terminal"
 
 TERMINAL_CSS = """
 <style>
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+
+    /* Hide Streamlit Chrome & Fix Top Clipping while preserving Sidebar Toggle */
+    [data-testid="stAppDeployButton"], .stDeployButton, #MainMenu {
+        display: none !important;
+        visibility: hidden !important;
+    }
+    header[data-testid="stHeader"] {
+        background: transparent !important;
+        color: #c9d1d9 !important;
+        pointer-events: none !important;
+        z-index: 999990 !important;
+    }
+    /* Ensure sidebar toggle controls are clickable, fully visible, and high-contrast in dark mode */
+    [data-testid="stSidebarCollapsedControl"],
+    [data-testid="stSidebarCollapsedControl"] button,
+    [data-testid="stExpandSidebarButton"],
+    [data-testid="stSidebarCollapseButton"],
+    [data-testid="stSidebarCollapseButton"] button,
+    header[data-testid="stHeader"] button[aria-label="Expand sidebar"],
+    header[data-testid="stHeader"] button[data-testid="stExpandSidebarButton"],
+    button[aria-label="Collapse sidebar"],
+    button[aria-label="Expand sidebar"] {
+        pointer-events: auto !important;
+        visibility: visible !important;
+        opacity: 1 !important;
+        color: #c9d1d9 !important;
+    }
+    [data-testid="stExpandSidebarButton"],
+    [data-testid="stSidebarCollapsedControl"] button,
+    [data-testid="stSidebarCollapseButton"] button,
+    button[aria-label="Collapse sidebar"],
+    button[aria-label="Expand sidebar"] {
+        background-color: #161b22 !important;
+        border: 1px solid #30363d !important;
+        border-radius: 6px !important;
+        cursor: pointer !important;
+        transition: all 0.15s ease-in-out !important;
+    }
+    [data-testid="stExpandSidebarButton"]:hover,
+    [data-testid="stSidebarCollapsedControl"] button:hover,
+    [data-testid="stSidebarCollapseButton"] button:hover,
+    button[aria-label="Collapse sidebar"]:hover,
+    button[aria-label="Expand sidebar"]:hover {
+        background-color: #21262d !important;
+        border-color: #58a6ff !important;
+        color: #58a6ff !important;
+        box-shadow: 0 0 8px rgba(88, 166, 255, 0.3) !important;
+    }
+    /* Force inner icon / span / svg to high contrast light gray instead of muted dark gray */
+    [data-testid="stSidebarCollapsedControl"] *,
+    [data-testid="stExpandSidebarButton"] *,
+    [data-testid="stSidebarCollapseButton"] *,
+    button[aria-label="Collapse sidebar"] *,
+    button[aria-label="Expand sidebar"] * {
+        color: #c9d1d9 !important;
+        fill: #c9d1d9 !important;
+    }
+    [data-testid="stSidebarCollapsedControl"]:hover *,
+    [data-testid="stExpandSidebarButton"]:hover *,
+    [data-testid="stSidebarCollapseButton"]:hover *,
+    button[aria-label="Collapse sidebar"]:hover *,
+    button[aria-label="Expand sidebar"]:hover * {
+        color: #58a6ff !important;
+        fill: #58a6ff !important;
+    }
+    .block-container {
+        padding-top: 1.5rem !important;
+        padding-bottom: 3rem !important;
+    }
+
     /* Dark Terminal Theme */
     .stApp {
         background-color: #0d1117;
         color: #c9d1d9;
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        font-family: 'Plus Jakarta Sans', -apple-system, sans-serif !important;
     }
     
     /* Metrics and Monospace Numbers */
     div[data-testid="stMetricValue"] {
-        font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace !important;
+        font-family: 'JetBrains Mono', "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace !important;
         font-size: 1.6rem !important;
         font-weight: 700 !important;
         color: #58a6ff !important;
+        font-variant-numeric: tabular-nums !important;
     }
     
     /* KPI Card Container */
     .kpi-card {
-        background-color: #161b22;
+        background: linear-gradient(145deg, #161b22 0%, #0d1117 100%) !important;
         border: 1px solid #30363d;
+        border-top: 1px solid rgba(255, 255, 255, 0.12) !important;
         border-radius: 6px;
         padding: 14px 18px;
         margin-bottom: 12px;
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4) !important;
     }
     .kpi-title {
         color: #8b949e;
@@ -90,10 +164,11 @@ TERMINAL_CSS = """
         margin-bottom: 4px;
     }
     .kpi-value {
-        font-family: "SFMono-Regular", Consolas, monospace;
+        font-family: 'JetBrains Mono', "SFMono-Regular", Consolas, monospace !important;
         font-size: 1.5rem;
         font-weight: 700;
         color: #f0f6fc;
+        font-variant-numeric: tabular-nums;
     }
     .kpi-sub {
         font-size: 0.8rem;
@@ -149,7 +224,7 @@ TERMINAL_CSS = """
         background: #1E293B !important;
         border: 1px solid #334155 !important;
         color: #F8FAFC !important;
-        font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace !important;
+        font-family: 'JetBrains Mono', "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace !important;
         font-weight: 700 !important;
         font-size: 0.68rem !important;
         padding: 0 1px !important;
@@ -177,7 +252,7 @@ TERMINAL_CSS = """
     div[data-testid="stSidebar"] div[data-testid="stColumn"]:has(.quick-pill-btn) button div,
     div[data-testid="stSidebar"] div[data-testid="stColumn"]:has(.quick-pill-btn) button p,
     div[data-testid="stSidebar"] div[data-testid="stColumn"]:has(.quick-pill-btn) button span {
-        font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace !important;
+        font-family: 'JetBrains Mono', "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace !important;
         font-weight: 700 !important;
         font-size: 0.68rem !important;
         color: #F8FAFC !important;
@@ -355,9 +430,8 @@ def build_football_field_chart(
             name="Valuation Range",
             hoverinfo="text",
             text=[f"{sym}{low:.1f} - {sym}{low + w:.1f}" for low, w in zip(lows, widths)],
-            textposition="inside",
-            insidetextanchor="middle",
-            textfont=dict(color="#F8FAFC", size=11, family="Inter, sans-serif"),
+            textposition="none",
+textfont=dict(color="#F8FAFC", size=11, family="Inter, sans-serif"),
         )
     )
 
@@ -373,6 +447,17 @@ def build_football_field_chart(
             hovertext=[f"Mid: {sym}{m:.2f}" for m in mids],
         )
     )
+
+    # Vertically shifted range labels (12px above bar center so they never touch the orange diamond)
+    for cat, low, w in zip(categories, lows, widths):
+        fig.add_annotation(
+            x=low + w / 2.0,
+            y=cat,
+            text=f"{sym}{low:.1f} - {sym}{low + w:.1f}",
+            showarrow=False,
+            yshift=12,
+            font=dict(color="#F8FAFC", size=11, family="Inter, sans-serif"),
+        )
 
     # Current market price reference line
     fig.add_vline(
@@ -397,7 +482,7 @@ def build_football_field_chart(
         ),
         yaxis=dict(gridcolor="#30363d", autorange="reversed"),
         height=380,
-        margin=dict(l=20, r=20, t=50, b=40),
+        margin=dict(l=20, r=30, t=50, b=40),
         showlegend=True,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
@@ -539,6 +624,8 @@ def build_monte_carlo_histogram(
         line_color="#ef4444",
         line_width=2,
         annotation_text=f"P5: {sym}{p5:.1f}",
+        annotation_position="top left",
+        annotation_yshift=2,
         annotation_font=dict(color="#ef4444", size=10),
     )
 
@@ -549,6 +636,8 @@ def build_monte_carlo_histogram(
         line_color="#f59e0b",
         line_width=2,
         annotation_text=f"Median P50: {sym}{p50:.1f}",
+        annotation_position="top right",
+        annotation_yshift=-18,
         annotation_font=dict(color="#f59e0b", size=10),
     )
 
@@ -559,6 +648,8 @@ def build_monte_carlo_histogram(
         line_color="#10b981",
         line_width=2,
         annotation_text=f"P95: {sym}{p95:.1f}",
+        annotation_position="top left",
+        annotation_yshift=-36,
         annotation_font=dict(color="#10b981", size=10),
     )
 
@@ -569,6 +660,8 @@ def build_monte_carlo_histogram(
         line_color="#06b6d4",
         line_width=2.5,
         annotation_text=f"Traded: {sym}{current_price:.1f}",
+        annotation_position="top right",
+        annotation_yshift=18,
         annotation_font=dict(color="#06b6d4", size=11),
     )
 
@@ -1212,9 +1305,6 @@ def main() -> None:
                 </div>
             </div>
             <div style="display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px;">
-                <div class="provenance-pill" style="color: #58a6ff;">
-                    🏢 Market Cap: {formatted_mc}
-                </div>
                 <div class="provenance-pill" style="color: {'#3fb950' if is_live_data else '#d29922'};">
                     {source_pill}
                 </div>
@@ -1245,7 +1335,7 @@ def main() -> None:
         st.markdown("### Executive Summary & Intrinsic Value Synthesis")
 
         # Top KPI Metric Cards
-        col1, col2, col3, col4, col5 = st.columns(5)
+        col1, col2, col3, col4 = st.columns(4)
         rec = active_val.recommendation
         badge_cls = "badge-buy" if rec == "BUY" else ("badge-hold" if rec == "HOLD" else "badge-sell")
 
@@ -1292,18 +1382,6 @@ def main() -> None:
                     <div class="kpi-title">Market Implied CAGR</div>
                     <div class="kpi-value">{active_val.reverse_dcf_implied_revenue_cagr * 100:.2f}%</div>
                     <div class="kpi-sub">SciPy brentq Reverse-DCF</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-        with col5:
-            eval_score = eval_card.overall_eval_score if eval_card else 100.0
-            st.markdown(
-                f"""
-                <div class="kpi-card">
-                    <div class="kpi-title">Eval Scorecard</div>
-                    <div class="kpi-value" style="color: #38bdf8 !important;">{eval_score:.1f}/100</div>
-                    <div class="kpi-sub">3-Layer Verification Passed</div>
                 </div>
                 """,
                 unsafe_allow_html=True,

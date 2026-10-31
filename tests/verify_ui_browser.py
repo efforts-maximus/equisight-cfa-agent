@@ -90,6 +90,91 @@ def verify_dashboard_browser(url: str = "http://localhost:8501", max_retries: in
             browser.close()
             return False
 
+        # 1.1 Verify Vertical Side Navbar Collapse and Expand-Back Cycle
+        print("[*] Verifying vertical side navbar collapse and expand-back cycle...")
+        sidebar = page.locator('section[data-testid="stSidebar"]')
+        if not sidebar.is_visible():
+            print("[!] Sidebar is not visible initially!", file=sys.stderr)
+            browser.close()
+            return False
+
+        collapse_btn = page.locator('button[aria-label="Collapse sidebar"]')
+        if collapse_btn.count() == 0 or not collapse_btn.first.is_visible():
+            print("[!] Sidebar collapse button is not visible!", file=sys.stderr)
+            browser.close()
+            return False
+
+        # Verify Deploy button and MainMenu are hidden
+        deploy_btn = page.locator('[data-testid="stAppDeployButton"], .stDeployButton')
+        main_menu = page.locator('#MainMenu')
+        if deploy_btn.count() > 0 and deploy_btn.is_visible():
+            print("[!] Deploy button is visible but should be hidden!", file=sys.stderr)
+            browser.close()
+            return False
+        if main_menu.count() > 0 and main_menu.is_visible():
+            print("[!] MainMenu is visible but should be hidden!", file=sys.stderr)
+            browser.close()
+            return False
+
+        # Collapse sidebar
+        collapse_btn.first.click()
+        time.sleep(1.5)
+
+        # Assert sidebar is collapsed
+        sidebar_bbox = sidebar.bounding_box()
+        is_collapsed = (sidebar_bbox is None) or (sidebar_bbox["width"] <= 1) or (sidebar_bbox["x"] < 0)
+        if not is_collapsed:
+            print(f"[!] Sidebar failed to collapse, bounding box: {sidebar_bbox}", file=sys.stderr)
+            browser.close()
+            return False
+
+        collapsed_screenshot = OUTPUTS_DIR / "sidebar_collapsed.png"
+        page.screenshot(path=str(collapsed_screenshot), full_page=True)
+        print(f"[+] Screenshot captured: {collapsed_screenshot}")
+
+        # Locate expand button and click to bring sidebar back
+        expand_btn = page.locator('button[data-testid="stExpandSidebarButton"], [data-testid="stSidebarCollapsedControl"] button, button[aria-label="Expand sidebar"]')
+        if expand_btn.count() == 0 or not expand_btn.first.is_visible():
+            print("[!] Expand sidebar button is not visible when sidebar is collapsed!", file=sys.stderr)
+            browser.close()
+            return False
+
+        # Verify expand button has high-contrast styling in dark theme
+        expand_style = page.evaluate("""() => {
+            const btn = document.querySelector('[data-testid="stExpandSidebarButton"], [data-testid="stSidebarCollapsedControl"] button, button[aria-label="Expand sidebar"]');
+            if (!btn) return null;
+            const span = btn.querySelector('span[data-testid="stIconMaterial"], span, svg');
+            const csBtn = window.getComputedStyle(btn);
+            const csSpan = span ? window.getComputedStyle(span) : null;
+            return {
+                btnBg: csBtn.backgroundColor,
+                spanColor: csSpan ? csSpan.color : null,
+                pointerEvents: csBtn.pointerEvents
+            };
+        }""")
+        if expand_style:
+            print(f"[+] Expand button style: {expand_style}")
+            if expand_style.get("spanColor") == "rgba(49, 51, 63, 0.6)":
+                print("[!] Expand button icon has low contrast rgba(49, 51, 63, 0.6)!", file=sys.stderr)
+                browser.close()
+                return False
+
+        expand_btn.first.click()
+        time.sleep(1.5)
+
+        # Assert sidebar is re-expanded
+        sidebar_bbox_after = sidebar.bounding_box()
+        is_expanded = sidebar.is_visible() and sidebar_bbox_after is not None and sidebar_bbox_after["width"] > 200
+        if not is_expanded:
+            print(f"[!] Sidebar failed to expand back, bounding box: {sidebar_bbox_after}", file=sys.stderr)
+            browser.close()
+            return False
+
+        reexpanded_screenshot = OUTPUTS_DIR / "sidebar_reexpanded.png"
+        page.screenshot(path=str(reexpanded_screenshot), full_page=True)
+        print(f"[+] Screenshot captured: {reexpanded_screenshot}")
+        print("[+] Vertical side navbar collapsed and brought back successfully!")
+
         # 2. Switch to Deep-Dive Research Terminal via clicking a Live Market Mover Card
         print("[*] Clicking Live Market Mover card to enter Deep-Dive Research Terminal...")
         mover_cards = page.locator('button:has-text("MCap")')
@@ -103,6 +188,31 @@ def verify_dashboard_browser(url: str = "http://localhost:8501", max_retries: in
         page.wait_for_selector('div[data-testid="stTabs"]', timeout=60000)
         page.wait_for_selector('.js-plotly-plot', timeout=30000)
         time.sleep(3)
+
+        # 2.1 Verify Vertical Side Navbar Collapse and Expand Cycle inside Deep-Dive Terminal
+        print("[*] Verifying sidebar collapse and expand cycle inside Deep-Dive Research Terminal...")
+        deep_collapse = page.locator('button[aria-label="Collapse sidebar"]')
+        if deep_collapse.count() > 0 and deep_collapse.first.is_visible():
+            deep_collapse.first.click()
+            time.sleep(1.5)
+            deep_sidebar_bbox = sidebar.bounding_box()
+            if (deep_sidebar_bbox is not None) and (deep_sidebar_bbox["width"] > 1 and deep_sidebar_bbox["x"] >= 0):
+                print(f"[!] Sidebar failed to collapse inside Deep-Dive Terminal, bbox: {deep_sidebar_bbox}", file=sys.stderr)
+                browser.close()
+                return False
+            deep_expand = page.locator('button[data-testid="stExpandSidebarButton"], [data-testid="stSidebarCollapsedControl"] button, button[aria-label="Expand sidebar"]')
+            if deep_expand.count() == 0 or not deep_expand.first.is_visible():
+                print("[!] Expand button not visible inside Deep-Dive Terminal when collapsed!", file=sys.stderr)
+                browser.close()
+                return False
+            deep_expand.first.click()
+            time.sleep(1.5)
+            deep_sidebar_bbox_after = sidebar.bounding_box()
+            if not (sidebar.is_visible() and deep_sidebar_bbox_after is not None and deep_sidebar_bbox_after["width"] > 200):
+                print(f"[!] Sidebar failed to re-expand inside Deep-Dive Terminal, bbox: {deep_sidebar_bbox_after}", file=sys.stderr)
+                browser.close()
+                return False
+            print("[+] Sidebar collapse and expand cycle verified inside Deep-Dive Research Terminal!")
 
         # Tab definitions and screenshot file targets
         tabs_to_verify = [

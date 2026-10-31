@@ -246,11 +246,11 @@ $$K_e = R_f + \beta_{\text{adj}} \times \text{ERP}, \quad K_{d,\text{after-tax}}
 $$\text{WACC} = \left(\frac{E}{D + E}\right) K_e + \left(\frac{D}{D + E}\right) K_{d,\text{after-tax}}$$
 
 ### E. 2-Stage 5-Year Free Cash Flow to Firm (FCFF) & 50/50 Blended Terminal Value
-$$\text{FCFF}_t = \text{EBIT}_t \times (1 - t) + \text{D\&A}_t - \text{CapEx}_t - \Delta\text{NWC}_t$$
+$$\text{FCFF}_t = \text{EBIT}_t \times (1 - t) + \text{DA}_t - \text{CapEx}_t - \Delta\text{NWC}_t$$
 
 $$\text{PV}(\text{FCFF}) = \sum_{t=1}^{5} \frac{\text{FCFF}_t}{(1 + \text{WACC})^t}$$
 
-Terminal Value at Year 5 blends the **Fuller & Hsia CFA H-Model** ($\text{TV}_{\text{H-Model}}$, using moat half-life $H \in [2.2, 7.0]$) with a **Mean-Reverted Exit EV/EBITDA Multiple** ($\text{TV}_{\text{Exit}}$):
+Terminal Value at Year 5 blends the **Fuller & Hsia CFA H-Model** (`TV_H-Model`, using moat half-life `H` in `[2.2, 7.0]`) with a **Mean-Reverted Exit EV/EBITDA Multiple** (`TV_Exit`):
 
 $$\text{TV}_{\text{H-Model}} = \frac{\text{FCFF}_5 \times \left[(1 + g) + H \times (\bar{g}_{5\text{yr}} - g)\right]}{\text{WACC} - g}, \quad \text{TV}_{\text{Exit}} = \text{EBITDA}_5 \times M_{\text{exit}}$$
 
@@ -258,14 +258,14 @@ $$\text{TV}_5 = 0.50 \times \text{TV}_{\text{H-Model}} + 0.50 \times \text{TV}_{
 
 $$\text{Enterprise Value (EV)} = \text{PV}(\text{FCFF}) + \frac{\text{TV}_5}{(1 + \text{WACC})^5}$$
 
-$$\text{Implied Equity Value} = \text{EV} + \text{Cash \& Equivalents} - \text{Total Debt}$$
+$$\text{Implied Equity Value} = \text{EV} + \text{Cash and Equivalents} - \text{Total Debt}$$
 
 $$\text{Intrinsic Price Per Share} = \frac{\text{Implied Equity Value}}{\text{Shares Outstanding}}$$
 
 ### F. SciPy `brentq` Reverse-DCF Root Solver
-Solves for the market-implied 5-year annual revenue growth rate $g_{\text{rev}}^*$ that sets Base Case intrinsic value equal to the current traded price $P_0$:
+Solves for the market-implied 5-year annual revenue growth rate $g_{\text{rev}}^{\star}$ that sets Base Case intrinsic value equal to the current traded price $P_0$:
 
-$$f(g_{\text{rev}}^*) = P_{\text{DCF}}(g_{\text{rev}}^*) - P_0 = 0$$
+$$f(g_{\text{rev}}^{\star}) = P_{\text{DCF}}(g_{\text{rev}}^{\star}) - P_0 = 0$$
 
 ---
 
