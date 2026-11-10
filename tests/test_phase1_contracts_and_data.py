@@ -984,3 +984,590 @@ def test_market_pulse_offline_fallback_zero_fabrication():
         assert "zero fabricated numbers" in msg or "does not fabricate synthetic market movers" in msg
 
 
+# ==============================================================================
+# 11. UNIVERSAL MULTI-CURRENCY FX NORMALIZATION TESTS
+# ==============================================================================
+
+def test_resolve_fx_rate_subunits_live_and_fallback():
+    """Verifies _resolve_fx_rate handles sub-units (GBp/ZAc), live quotes, history fallback, and static fallback."""
+    from unittest.mock import MagicMock, patch
+    import pandas as pd
+    from src.data.market_gateway import _FX_RATE_CACHE, _FALLBACK_USD_RATES, _resolve_fx_rate
+
+    saved_cache = dict(_FX_RATE_CACHE)
+    try:
+        # 1. Identity & empty cases
+        _FX_RATE_CACHE.clear()
+        assert _resolve_fx_rate("USD", "USD") == 1.0
+        assert _resolve_fx_rate("INR", "INR") == 1.0
+        assert _resolve_fx_rate("", "USD") == 1.0
+        assert _resolve_fx_rate("USD", "") == 1.0
+        assert _resolve_fx_rate("GBp", "GBP") == pytest.approx(0.01)
+        assert _resolve_fx_rate("GBP", "GBp") == pytest.approx(100.0)
+        assert _resolve_fx_rate("GBp", "GBp") == pytest.approx(1.0)
+        assert _resolve_fx_rate("ZAc", "ZAR") == pytest.approx(0.01)
+
+        # 2. Fallback table when live yfinance raises
+        _FX_RATE_CACHE.clear()
+        with patch("yfinance.Ticker", side_effect=RuntimeError("Offline")):
+            assert _resolve_fx_rate("KRW", "USD") == pytest.approx(1.0 / 1385.0)
+            assert _resolve_fx_rate("JPY", "USD") == pytest.approx(1.0 / 152.0)
+            assert _resolve_fx_rate("TWD", "USD") == pytest.approx(1.0 / 32.0)
+            assert _resolve_fx_rate("GBp", "USD") == pytest.approx(0.01 * _FALLBACK_USD_RATES["GBP"])
+            assert _resolve_fx_rate("ZAc", "USD") == pytest.approx(0.01 * _FALLBACK_USD_RATES["ZAR"])
+            assert _resolve_fx_rate("KRW", "INR") == pytest.approx((1.0 / 1385.0) / (1.0 / 86.5))
+            assert _resolve_fx_rate("ZZZ", "USD") == 1.0
+
+        # 3. Live FX via info + in-memory cache reuse
+        _FX_RATE_CACHE.clear()
+        fx_mock = MagicMock()
+        fx_mock.info = {"symbol": "EURUSD=X", "quoteType": "CURRENCY", "regularMarketPrice": 1.11}
+        with patch("yfinance.Ticker", return_value=fx_mock) as ticker_cls:
+            rate1 = _resolve_fx_rate("EUR", "USD")
+            rate2 = _resolve_fx_rate("EUR", "USD")
+            assert rate1 == pytest.approx(1.11)
+            assert rate2 == pytest.approx(1.11)
+            assert ticker_cls.call_count == 1
+
+        # 4. History 5d fallback when info has no valid price
+        _FX_RATE_CACHE.clear()
+        hist_mock = MagicMock()
+        hist_mock.info = {"symbol": "JPYUSD=X", "quoteType": "CURRENCY", "regularMarketPrice": 0.0}
+        hist_mock.history.return_value = pd.DataFrame({"Close": [0.0064, 0.0066]})
+        with patch("yfinance.Ticker", return_value=hist_mock):
+            assert _resolve_fx_rate("JPY", "USD") == pytest.approx(0.0066)
+    finally:
+        _FX_RATE_CACHE.clear()
+        _FX_RATE_CACHE.update(saved_cache)
+
+
+def test_parse_yfinance_snapshot_krw_full_fx_normalization():
+    """Verifies mocked KRW equity (005930.KS) converts price, 52w range, market_cap, and statements cleanly to USD."""
+    from unittest.mock import MagicMock, patch
+    import numpy as np
+    import pandas as pd
+    from src.data.market_gateway import _FX_RATE_CACHE, parse_yfinance_snapshot
+    from src.engines.valuation_engine import compute_single_dcf
+
+    saved_cache = dict(_FX_RATE_CACHE)
+    try:
+        _FX_RATE_CACHE.clear()
+
+        dates = pd.to_datetime(["2022-12-31", "2023-12-31", "2024-12-31", "2025-12-31"])
+        fin_df = pd.DataFrame(
+            {
+                d: [
+                    300_000_000_000_000.0,  # Total Revenue (300T KRW)
+                    190_000_000_000_000.0,  # Cost Of Revenue
+                    40_000_000_000_000.0,   # EBIT
+                    35_000_000_000_000.0,   # Reconciled Depreciation
+                    800_000_000_000.0,      # Interest Expense
+                    34_000_000_000_000.0,   # Net Income
+                ]
+                for d in dates
+            },
+            index=[
+                "Total Revenue",
+                "Cost Of Revenue",
+                "EBIT",
+                "Reconciled Depreciation",
+                "Interest Expense",
+                "Net Income",
+            ],
+        )
+        bs_df = pd.DataFrame(
+            {
+                d: [
+                    490_000_000_000_000.0,  # Total Assets
+                    230_000_000_000_000.0,  # Current Assets
+                    110_000_000_000_000.0,  # Cash And Cash Equivalents
+                    40_000_000_000_000.0,   # Receivables
+                    55_000_000_000_000.0,   # Inventory
+                    100_000_000_000_000.0,  # Total Liabilities Net Minority Interest
+                    75_000_000_000_000.0,   # Current Liabilities
+                    15_000_000_000_000.0,   # Accounts Payable
+                    18_000_000_000_000.0,   # Total Debt
+                    350_000_000_000_000.0,  # Retained Earnings
+                ]
+                for d in dates
+            },
+            index=[
+                "Total Assets",
+                "Current Assets",
+                "Cash And Cash Equivalents",
+                "Receivables",
+                "Inventory",
+                "Total Liabilities Net Minority Interest",
+                "Current Liabilities",
+                "Accounts Payable",
+                "Total Debt",
+                "Retained Earnings",
+            ],
+        )
+        cf_df = pd.DataFrame(
+            {
+                d: [
+                    65_000_000_000_000.0,   # Operating Cash Flow
+                    -45_000_000_000_000.0,  # Capital Expenditure
+                    -2_000_000_000_000.0,   # Change In Working Capital
+                ]
+                for d in dates
+            },
+            index=[
+                "Operating Cash Flow",
+                "Capital Expenditure",
+                "Change In Working Capital",
+            ],
+        )
+
+        hist_dates = pd.bdate_range("2025-01-01", periods=60)
+        idx_arr = np.arange(60, dtype=float)
+        stock_closes = 198900.0 * (1.0 + 0.02 * np.sin(idx_arr / 4.0) + 0.001 * idx_arr)
+        bench_closes = 5000.0 * (1.0 + 0.012 * np.sin(idx_arr / 4.0) + 0.0005 * idx_arr)
+
+        stock_hist = pd.DataFrame(
+            {"Close": stock_closes, "High": stock_closes * 1.02, "Low": stock_closes * 0.98},
+            index=hist_dates,
+        )
+        bench_hist = pd.DataFrame({"Close": bench_closes}, index=hist_dates)
+
+        samsung_mock = MagicMock()
+        samsung_mock.income_stmt = fin_df
+        samsung_mock.balance_sheet = bs_df
+        samsung_mock.cashflow = cf_df
+        samsung_mock.history.return_value = stock_hist
+
+        bench_mock = MagicMock()
+        bench_mock.history.return_value = bench_hist
+
+        fx_rate_krw_usd = 1.0 / 1385.0
+        fx_mock = MagicMock()
+        fx_mock.info = {"symbol": "KRWUSD=X", "quoteType": "CURRENCY", "regularMarketPrice": fx_rate_krw_usd}
+
+        def _ticker_router(sym: str):
+            if sym == "KRWUSD=X":
+                return fx_mock
+            if sym == "^GSPC":
+                return bench_mock
+            return samsung_mock
+
+        info = {
+            "symbol": "005930.KS",
+            "longName": "Samsung Electronics Co., Ltd.",
+            "sector": "Technology",
+            "industry": "Consumer Electronics",
+            "currency": "KRW",
+            "financialCurrency": "KRW",
+            "currentPrice": 198900.0,
+            "marketCap": 1_295_222_281_601_024.0,
+            "sharesOutstanding": 5_709_556_199.0,
+            "fiftyTwoWeekHigh": 374500.0,
+            "fiftyTwoWeekLow": 94500.0,
+        }
+
+        with patch("yfinance.Ticker", side_effect=_ticker_router):
+            snap = parse_yfinance_snapshot("005930.KS", samsung_mock, info)
+
+        assert snap.currency == "USD"
+        assert snap.unit_label == "USD Millions"
+        assert snap.benchmark_ticker == "^GSPC"
+        assert snap.current_price == pytest.approx(round(198900.0 * fx_rate_krw_usd, 2), abs=1e-2)
+        assert snap.current_price < 500.0  # Must NOT remain unconverted at 198,900
+        assert snap.high_52week == pytest.approx(round(374500.0 * fx_rate_krw_usd, 2), abs=1e-2)
+        assert snap.low_52week == pytest.approx(round(94500.0 * fx_rate_krw_usd, 2), abs=1e-2)
+
+        expected_mc_musd = (1_295_222_281_601_024.0 * fx_rate_krw_usd) / 1e6
+        assert snap.market_cap == pytest.approx(expected_mc_musd, rel=1e-2)
+        assert snap.historical_years[-1].revenue == pytest.approx((300e12 * fx_rate_krw_usd) / 1e6, rel=1e-2)
+
+        # Verify zero 1,000x price-to-DCF distortion
+        base_driver = make_valid_scenario_driver(name="base", prob=0.50, growth=0.06, margin=0.14)
+        dcf_res = compute_single_dcf(snap, base_driver, adjusted_beta=1.10)
+        ratio = dcf_res.intrinsic_value_per_share / snap.current_price
+        assert 0.1 < ratio < 10.0, f"Unexpected price-to-DCF ratio {ratio:.2f}"
+    finally:
+        _FX_RATE_CACHE.clear()
+        _FX_RATE_CACHE.update(saved_cache)
+
+
+def test_parse_yfinance_snapshot_gbp_subunit_and_hist_52w_conversion():
+    """Verifies GBp equity converts sub-unit price and hist 52-week high/low while keeping GBP marketCap exact."""
+    from unittest.mock import MagicMock, patch
+    import numpy as np
+    import pandas as pd
+    from src.data.market_gateway import _FX_RATE_CACHE, parse_yfinance_snapshot
+
+    saved_cache = dict(_FX_RATE_CACHE)
+    try:
+        _FX_RATE_CACHE.clear()
+
+        dates = pd.to_datetime(["2024-12-31", "2025-12-31"])
+        fin_df = pd.DataFrame(
+            {d: [50_000_000_000.0, 10_000_000_000.0, 12_000_000_000.0, 3_000_000_000.0, 800_000_000.0, 8_000_000_000.0] for d in dates},
+            index=["Total Revenue", "Cost Of Revenue", "EBIT", "Reconciled Depreciation", "Interest Expense", "Net Income"],
+        )
+        bs_df = pd.DataFrame(
+            {d: [100_000_000_000.0, 30_000_000_000.0, 6_000_000_000.0, 8_000_000_000.0, 5_000_000_000.0, 60_000_000_000.0, 20_000_000_000.0, 5_000_000_000.0, 25_000_000_000.0, 30_000_000_000.0] for d in dates},
+            index=["Total Assets", "Current Assets", "Cash And Cash Equivalents", "Receivables", "Inventory", "Total Liabilities Net Minority Interest", "Current Liabilities", "Accounts Payable", "Total Debt", "Retained Earnings"],
+        )
+        cf_df = pd.DataFrame(
+            {d: [11_000_000_000.0, -2_000_000_000.0, 500_000_000.0] for d in dates},
+            index=["Operating Cash Flow", "Capital Expenditure", "Change In Working Capital"],
+        )
+
+        hist_dates = pd.bdate_range("2025-01-01", periods=50)
+        idx_arr = np.arange(50, dtype=float)
+        closes = 13946.0 + 400.0 * np.sin(idx_arr / 3.0)
+        highs = np.full(50, 15000.0)
+        lows = np.full(50, 10000.0)
+        stock_hist = pd.DataFrame({"Close": closes, "High": highs, "Low": lows}, index=hist_dates)
+        bench_hist = pd.DataFrame({"Close": 5000.0 + 50.0 * np.sin(idx_arr / 3.0)}, index=hist_dates)
+
+        azn_mock = MagicMock()
+        azn_mock.income_stmt = fin_df
+        azn_mock.balance_sheet = bs_df
+        azn_mock.cashflow = cf_df
+        azn_mock.history.return_value = stock_hist
+
+        bench_mock = MagicMock()
+        bench_mock.history.return_value = bench_hist
+
+        fx_mock = MagicMock()
+        fx_mock.info = {"symbol": "GBPUSD=X", "quoteType": "CURRENCY", "regularMarketPrice": 1.28}
+
+        def _router(sym: str):
+            if sym == "GBPUSD=X":
+                return fx_mock
+            if sym == "^GSPC":
+                return bench_mock
+            return azn_mock
+
+        info = {
+            "symbol": "AZN.L",
+            "longName": "AstraZeneca PLC",
+            "currency": "GBp",
+            "financialCurrency": "USD",
+            "currentPrice": 13946.0,
+            "marketCap": 216_290_967_552.0,
+            "sharesOutstanding": 1_550_917_690.0,
+            # Omit fiftyTwoWeekHigh / Low to exercise hist_stock High/Low FX scaling
+        }
+
+        with patch("yfinance.Ticker", side_effect=_router):
+            snap = parse_yfinance_snapshot("AZN.L", azn_mock, info)
+
+        assert snap.currency == "USD"
+        assert snap.current_price == pytest.approx(round(13946.0 * 0.01 * 1.28, 2), abs=1e-2)
+        assert snap.high_52week == pytest.approx(round(15000.0 * 0.01 * 1.28, 2), abs=1e-2)
+        assert snap.low_52week == pytest.approx(round(10000.0 * 0.01 * 1.28, 2), abs=1e-2)
+        assert snap.market_cap == pytest.approx((216_290_967_552.0 * 1.28) / 1e6, rel=1e-2)
+        assert snap.shares_outstanding == pytest.approx(1550.92, rel=1e-2)
+    finally:
+        _FX_RATE_CACHE.clear()
+        _FX_RATE_CACHE.update(saved_cache)
+
+
+def test_extract_normalized_peer_multiples_cross_currency():
+    """Verifies universal cross-currency peer multiple normalization across TWD/USD, USD/INR, JPY/USD, and USD/KRW."""
+    from unittest.mock import patch
+    from src.data.market_gateway import _FALLBACK_USD_RATES, _FX_RATE_CACHE, _extract_normalized_peer_multiples
+
+    saved_cache = dict(_FX_RATE_CACHE)
+    try:
+        _FX_RATE_CACHE.clear()
+        with patch("yfinance.Ticker", side_effect=RuntimeError("Force deterministic fallback FX")):
+            # 1. TWD financialCurrency vs USD price currency (ADR scale-down distortion < 4.0)
+            _, ev_eb_twd, _, ev_s_twd = _extract_normalized_peer_multiples({
+                "symbol": "TSM",
+                "currency": "USD",
+                "financialCurrency": "TWD",
+                "trailingPE": 22.0,
+                "enterpriseToEbitda": 0.48,
+                "priceToBook": 5.5,
+                "enterpriseToRevenue": 0.35,
+            })
+            assert ev_eb_twd == pytest.approx(0.48 * 32.0, rel=1e-4)
+            assert ev_s_twd == pytest.approx(0.35 * 32.0, rel=1e-4)
+
+            # 2. USD financialCurrency vs INR price currency (scale-up distortion > 60.0)
+            _, ev_eb_inr, _, ev_s_inr = _extract_normalized_peer_multiples({
+                "symbol": "INFY.NS",
+                "currency": "INR",
+                "financialCurrency": "USD",
+                "trailingPE": 25.0,
+                "enterpriseToEbitda": 1384.0,
+                "priceToBook": 7.0,
+                "enterpriseToRevenue": 432.5,
+            })
+            assert ev_eb_inr == pytest.approx(16.0, rel=1e-4)
+            assert ev_s_inr == pytest.approx(5.0, rel=1e-4)
+
+            # 3. JPY financialCurrency vs USD price currency
+            _, ev_eb_jpy, _, ev_s_jpy = _extract_normalized_peer_multiples({
+                "symbol": "SONY",
+                "currency": "USD",
+                "financialCurrency": "JPY",
+                "trailingPE": 18.0,
+                "enterpriseToEbitda": 0.10,
+                "priceToBook": 2.0,
+                "enterpriseToRevenue": 0.02,
+            })
+            assert ev_eb_jpy == pytest.approx(0.10 * 152.0, rel=1e-4)
+            assert ev_s_jpy == pytest.approx(0.02 * 152.0, rel=1e-4)
+
+            # 4. USD financialCurrency vs KRW price currency
+            _, ev_eb_krw, _, ev_s_krw = _extract_normalized_peer_multiples({
+                "symbol": "005930.KS",
+                "currency": "KRW",
+                "financialCurrency": "USD",
+                "trailingPE": 12.0,
+                "enterpriseToEbitda": 13850.0,
+                "priceToBook": 1.5,
+                "enterpriseToRevenue": 2770.0,
+            })
+            assert ev_eb_krw == pytest.approx(10.0, rel=1e-4)
+            assert ev_s_krw == pytest.approx(2.0, rel=1e-4)
+
+            # 5. Non-distorted cross-currency (already properly normalized by Yahoo) must remain untouched
+            _, ev_eb_ok, _, ev_s_ok = _extract_normalized_peer_multiples({
+                "symbol": "TSM",
+                "currency": "USD",
+                "financialCurrency": "TWD",
+                "trailingPE": 24.0,
+                "enterpriseToEbitda": 18.5,
+                "priceToBook": 6.0,
+                "enterpriseToRevenue": 11.0,
+            })
+            assert ev_eb_ok == pytest.approx(18.5)
+            assert ev_s_ok == pytest.approx(11.0)
+
+            # 6. Same-currency INR fallback guard (ev_ebitda > 150.0)
+            _, ev_eb_fb, _, ev_s_fb = _extract_normalized_peer_multiples({
+                "symbol": "TECHM.NS",
+                "currency": "INR",
+                "financialCurrency": "INR",
+                "trailingPE": 20.0,
+                "enterpriseToEbitda": 865.0,
+                "priceToBook": 4.0,
+                "enterpriseToRevenue": 259.5,
+            })
+            assert ev_eb_fb == pytest.approx(10.0, rel=1e-4)
+            assert ev_s_fb == pytest.approx(3.0, rel=1e-4)
+
+            # 7. Sub-unit ZAc trading currency with USD financialCurrency (Yahoo computes EV in ZAR, not ZAc)
+            _, ev_eb_npn, _, ev_s_npn = _extract_normalized_peer_multiples({
+                "symbol": "NPN.JO",
+                "currency": "ZAc",
+                "financialCurrency": "USD",
+                "trailingPE": 28.0,
+                "enterpriseToEbitda": 981.347,
+                "priceToBook": 2.4,
+                "enterpriseToRevenue": 56.901,
+            })
+            usd_to_zar = 1.0 / _FALLBACK_USD_RATES["ZAR"]
+            assert ev_eb_npn == pytest.approx(981.347 / usd_to_zar, rel=1e-4)
+            assert ev_s_npn == pytest.approx(56.901 / usd_to_zar, rel=1e-4)
+
+            # 8. GBp trading currency with GBP financialCurrency (EV already in GBP -> must stay untouched)
+            _, ev_eb_gsk, _, ev_s_gsk = _extract_normalized_peer_multiples({
+                "symbol": "GSK.L",
+                "currency": "GBp",
+                "financialCurrency": "GBP",
+                "trailingPE": 14.0,
+                "enterpriseToEbitda": 8.423,
+                "priceToBook": 4.1,
+                "enterpriseToRevenue": 2.886,
+            })
+            assert ev_eb_gsk == pytest.approx(8.423, rel=1e-4)
+            assert ev_s_gsk == pytest.approx(2.886, rel=1e-4)
+
+            # 9. Missing/zero EBITDA with distorted EV/Sales still normalizes EV/Sales
+            _, ev_eb_zero1, _, ev_s_zero1 = _extract_normalized_peer_multiples({
+                "symbol": "LOSS.NS",
+                "currency": "INR",
+                "financialCurrency": "USD",
+                "enterpriseToEbitda": None,
+                "enterpriseToRevenue": 432.5,
+            })
+            assert ev_eb_zero1 == 0.0
+            assert ev_s_zero1 == pytest.approx(5.0, rel=1e-4)
+
+            _, ev_eb_zero2, _, ev_s_zero2 = _extract_normalized_peer_multiples({
+                "symbol": "LOSS_ADR",
+                "currency": "USD",
+                "financialCurrency": "TWD",
+                "enterpriseToEbitda": 0.0,
+                "enterpriseToRevenue": 0.10,
+            })
+            assert ev_eb_zero2 == 0.0
+            assert ev_s_zero2 == pytest.approx(3.2, rel=1e-4)
+    finally:
+        _FX_RATE_CACHE.clear()
+        _FX_RATE_CACHE.update(saved_cache)
+
+
+def test_resolve_fx_rate_guards_against_stock_mock_leak_and_poisoned_cache():
+    """Verifies _resolve_fx_rate ignores mismatched non-CURRENCY mocks, survives .info exceptions, and skips caching unknown 1.0 fallback."""
+    from unittest.mock import MagicMock, PropertyMock, patch
+    import numpy as np
+    import pandas as pd
+    from src.data.market_gateway import _FX_RATE_CACHE, _resolve_fx_rate
+
+    saved_cache = dict(_FX_RATE_CACHE)
+    try:
+        # 1. Generic stock mock returning equity info & stock history must NOT leak 198,900 into FX rate
+        _FX_RATE_CACHE.clear()
+        stock_mock = MagicMock()
+        stock_mock.info = {"symbol": "005930.KS", "currency": "KRW", "regularMarketPrice": 198900.0}
+        stock_mock.history.return_value = pd.DataFrame({"Close": [198000.0, 198900.0]})
+        with patch("yfinance.Ticker", return_value=stock_mock):
+            rate = _resolve_fx_rate("KRW", "USD")
+            assert rate == pytest.approx(1.0 / 1385.0)
+
+        # 2. If .info raises, .history("5d") must still run and resolve live rate
+        _FX_RATE_CACHE.clear()
+        hist_only_mock = MagicMock()
+        type(hist_only_mock).info = PropertyMock(side_effect=RuntimeError("info rate-limited"))
+        hist_only_mock.history.return_value = pd.DataFrame({"Close": [0.0065, 0.0067]})
+        with patch("yfinance.Ticker", return_value=hist_only_mock):
+            assert _resolve_fx_rate("JPY", "USD") == pytest.approx(0.0067)
+
+        # 3. Unknown currency pair must NOT cache emergency 1.0 default
+        _FX_RATE_CACHE.clear()
+        with patch("yfinance.Ticker", side_effect=RuntimeError("Offline")):
+            assert _resolve_fx_rate("ZZZ", "USD") == 1.0
+            assert ("ZZZ", "USD") not in _FX_RATE_CACHE
+
+        # 4. NaN regularMarketPrice + NumPy scalar price handled cleanly
+        _FX_RATE_CACHE.clear()
+        np_mock = MagicMock()
+        np_mock.info = {
+            "symbol": "EURUSD=X",
+            "quoteType": "CURRENCY",
+            "regularMarketPrice": float("nan"),
+            "currentPrice": np.float32(1.09),
+        }
+        with patch("yfinance.Ticker", return_value=np_mock):
+            assert _resolve_fx_rate("EUR", "USD") == pytest.approx(1.09, rel=1e-4)
+    finally:
+        _FX_RATE_CACHE.clear()
+        _FX_RATE_CACHE.update(saved_cache)
+
+
+def test_parse_yfinance_snapshot_gbp_implied_shares_omitted_fin_curr_and_nan_price():
+    """Verifies GBp defaults omitted financialCurrency to GBP, uses impliedSharesOutstanding for MC check, and rejects NaN price."""
+    from unittest.mock import MagicMock, patch
+    import numpy as np
+    import pandas as pd
+    from src.data.market_gateway import DataUnavailableError, _FX_RATE_CACHE, parse_yfinance_snapshot
+
+    saved_cache = dict(_FX_RATE_CACHE)
+    try:
+        _FX_RATE_CACHE.clear()
+
+        dates = pd.to_datetime(["2024-12-31", "2025-12-31"])
+        fin_df = pd.DataFrame(
+            {d: [40_000_000_000.0, 8_000_000_000.0, 10_000_000_000.0, 2_000_000_000.0, 500_000_000.0, 7_000_000_000.0] for d in dates},
+            index=["Total Revenue", "Cost Of Revenue", "EBIT", "Reconciled Depreciation", "Interest Expense", "Net Income"],
+        )
+        bs_df = pd.DataFrame(
+            {d: [80_000_000_000.0, 24_000_000_000.0, 5_000_000_000.0, 6_000_000_000.0, 4_000_000_000.0, 45_000_000_000.0, 15_000_000_000.0, 4_000_000_000.0, 18_000_000_000.0, 25_000_000_000.0] for d in dates},
+            index=["Total Assets", "Current Assets", "Cash And Cash Equivalents", "Receivables", "Inventory", "Total Liabilities Net Minority Interest", "Current Liabilities", "Accounts Payable", "Total Debt", "Retained Earnings"],
+        )
+        cf_df = pd.DataFrame(
+            {d: [9_000_000_000.0, -1_500_000_000.0, 400_000_000.0] for d in dates},
+            index=["Operating Cash Flow", "Capital Expenditure", "Change In Working Capital"],
+        )
+
+        hist_dates = pd.bdate_range("2025-01-01", periods=45)
+        idx_arr = np.arange(45, dtype=float)
+        closes = 13946.0 + 300.0 * np.sin(idx_arr / 3.0)
+        stock_hist = pd.DataFrame({"Close": closes, "High": closes * 1.05, "Low": closes * 0.95}, index=hist_dates)
+        bench_hist = pd.DataFrame({"Close": 5000.0 + 40.0 * np.sin(idx_arr / 3.0)}, index=hist_dates)
+
+        azn_mock = MagicMock()
+        azn_mock.income_stmt = fin_df
+        azn_mock.balance_sheet = bs_df
+        azn_mock.cashflow = cf_df
+        azn_mock.history.return_value = stock_hist
+
+        bench_mock = MagicMock()
+        bench_mock.history.return_value = bench_hist
+
+        fx_mock = MagicMock()
+        fx_mock.info = {"symbol": "GBPUSD=X", "quoteType": "CURRENCY", "regularMarketPrice": 1.28}
+
+        def _router(sym: str):
+            if sym == "GBPUSD=X":
+                return fx_mock
+            if sym == "^GSPC":
+                return bench_mock
+            return azn_mock
+
+        # NaN currentPrice must fail fast with DataUnavailableError
+        with pytest.raises(DataUnavailableError, match="No valid market price"):
+            parse_yfinance_snapshot("AZN.L", azn_mock, {"symbol": "AZN.L", "currentPrice": float("nan")})
+
+        # Omit financialCurrency & sharesOutstanding (only impliedSharesOutstanding present)
+        info = {
+            "symbol": "AZN.L",
+            "longName": "AstraZeneca PLC",
+            "currency": "GBp",
+            "currentPrice": 13946.0,
+            "marketCap": 216_290_967_552.0,
+            "impliedSharesOutstanding": 1_550_917_690.0,
+            "fiftyTwoWeekHigh": 15000.0,
+            "fiftyTwoWeekLow": 10000.0,
+        }
+        with patch("yfinance.Ticker", side_effect=_router):
+            snap = parse_yfinance_snapshot("AZN.L", azn_mock, info)
+
+        assert snap.currency == "USD"
+        assert snap.market_cap == pytest.approx((216_290_967_552.0 * 1.28) / 1e6, rel=1e-2)
+        assert snap.shares_outstanding == pytest.approx(1550.92, rel=1e-2)
+        # Statements must scale using GBP->USD (1.28), NOT GBp->USD (0.0128)
+        assert snap.historical_years[-1].revenue == pytest.approx((40_000_000_000.0 * 1.28) / 1e6, rel=1e-2)
+    finally:
+        _FX_RATE_CACHE.clear()
+        _FX_RATE_CACHE.update(saved_cache)
+
+
+def test_is_cache_valid_invalidates_unconverted_usd_high_price():
+    """Verifies _is_cache_valid rejects stale unconverted USD snapshots with current_price > 25,000."""
+    import time
+    from src.data.market_gateway import CACHE_VERSION, _is_cache_valid
+
+    now = time.time()
+    # Flat snapshot format (actual disk cache layout)
+    assert _is_cache_valid({
+        "cache_version": CACHE_VERSION,
+        "cached_at": now,
+        "currency": "USD",
+        "current_price": 198900.0,
+    }) is False
+
+    # Nested snapshot key format
+    assert _is_cache_valid({
+        "cache_version": CACHE_VERSION,
+        "cached_at": now,
+        "snapshot": {"currency": "USD", "current_price": 35000.0},
+    }) is False
+
+    # Valid USD price passes
+    assert _is_cache_valid({
+        "cache_version": CACHE_VERSION,
+        "cached_at": now,
+        "currency": "USD",
+        "current_price": 143.61,
+    }) is True
+
+    # Legitimate high-priced INR stock (e.g. MRF.NS > 25,000 INR) remains valid
+    assert _is_cache_valid({
+        "cache_version": CACHE_VERSION,
+        "cached_at": now,
+        "currency": "INR",
+        "current_price": 125000.0,
+    }) is True
+
+
+

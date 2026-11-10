@@ -47,6 +47,14 @@ def _is_cache_valid(cache_data: dict[str, Any]) -> bool:
     now = time.time()
     if cached_at <= 0.0 or (now - cached_at) > CACHE_TTL_SECONDS or cached_at > now + 300:
         return False
+    snap_obj = cache_data.get("snapshot") if isinstance(cache_data.get("snapshot"), dict) else cache_data
+    if isinstance(snap_obj, dict) and snap_obj.get("currency") == "USD":
+        try:
+            if float(snap_obj.get("current_price") or 0.0) > 25000.0:
+                return False
+        except (ValueError, TypeError) as exc:
+            logger.debug(f"Snapshot cache price validation parse error: {exc}")
+            return False
     if "peers" in cache_data and isinstance(cache_data["peers"], list):
         for p in cache_data["peers"]:
             if isinstance(p, dict):
@@ -79,6 +87,138 @@ class DataUnavailableError(RuntimeError):
     pass
 
 
+_FX_RATE_CACHE: dict[tuple[str, str], float] = {}
+
+_FALLBACK_USD_RATES: dict[str, float] = {
+    "USD": 1.0,
+    "INR": 1.0 / 86.5,
+    "EUR": 1.08,
+    "GBP": 1.28,
+    "JPY": 1.0 / 152.0,
+    "KRW": 1.0 / 1385.0,
+    "CNY": 1.0 / 7.20,
+    "CNH": 1.0 / 7.20,
+    "HKD": 1.0 / 7.78,
+    "TWD": 1.0 / 32.0,
+    "CAD": 0.72,
+    "AUD": 0.65,
+    "CHF": 1.13,
+    "SGD": 0.74,
+    "SEK": 0.095,
+    "NOK": 0.092,
+    "DKK": 0.145,
+    "BRL": 0.175,
+    "MXN": 0.050,
+    "ZAR": 0.055,
+    "SAR": 0.2666,
+    "AED": 0.2723,
+}
+
+
+def _resolve_fx_rate(from_curr: str, to_curr: str) -> float:
+    """Resolves FX rate converting 1 unit of `from_curr` into `to_curr`.
+
+    Handles sub-unit currency codes ('GBp' -> 0.01 * GBP, 'ZAc' -> 0.01 * ZAR),
+    caches resolved FX rates in _FX_RATE_CACHE, queries live yfinance FX pairs,
+    and falls back to _FALLBACK_USD_RATES cross-rates if live lookup fails.
+    """
+    raw_from = (from_curr or "").strip()
+    raw_to = (to_curr or "").strip()
+    if not raw_from or not raw_to:
+        return 1.0
+
+    mult = 1.0
+    if raw_from == "GBp":
+        mult *= 0.01
+        fc = "GBP"
+    elif raw_from == "ZAc":
+        mult *= 0.01
+        fc = "ZAR"
+    else:
+        fc = raw_from.upper()
+
+    if raw_to == "GBp":
+        mult /= 0.01
+        tc = "GBP"
+    elif raw_to == "ZAc":
+        mult /= 0.01
+        tc = "ZAR"
+    else:
+        tc = raw_to.upper()
+
+    if fc == tc:
+        return float(mult)
+
+    cache_key = (fc, tc)
+    if cache_key in _FX_RATE_CACHE:
+        return float(_FX_RATE_CACHE[cache_key] * mult)
+
+    rate_val = 0.0
+    should_cache = False
+    try:
+        import yfinance as yf  # type: ignore
+
+        fx_symbol = f"{fc}{tc}=X"
+        fx_ticker = yf.Ticker(fx_symbol)
+        mismatched_ticker = False
+
+        fx_info: Any = None
+        try:
+            fx_info = fx_ticker.info
+        except Exception as exc:
+            logger.debug(f"Live FX info lookup failed for {fx_symbol}: {exc}")
+
+        if isinstance(fx_info, dict):
+            qtype = str(fx_info.get("quoteType") or "").upper()
+            qsym = str(fx_info.get("symbol") or "").upper()
+            mismatched_ticker = (
+                (bool(qtype) and qtype != "CURRENCY")
+                or (bool(qsym) and qsym != fx_symbol.upper())
+            )
+            if not mismatched_ticker:
+                for px_key in ("regularMarketPrice", "currentPrice"):
+                    raw_px = fx_info.get(px_key)
+                    if isinstance(raw_px, (int, float, np.number)) and not isinstance(raw_px, bool):
+                        candidate = float(raw_px)
+                        if math.isfinite(candidate) and candidate > 0.0:
+                            rate_val = candidate
+                            should_cache = True
+                            break
+
+        if not mismatched_ticker and (not math.isfinite(rate_val) or rate_val <= 0.0):
+            try:
+                hist_fx = fx_ticker.history(period="5d")
+                if (
+                    hist_fx is not None
+                    and isinstance(getattr(hist_fx, "empty", None), bool)
+                    and not hist_fx.empty
+                    and "Close" in hist_fx.columns
+                ):
+                    closes = hist_fx["Close"].dropna()
+                    if not closes.empty:
+                        hist_val = float(closes.iloc[-1])
+                        if math.isfinite(hist_val) and hist_val > 0.0:
+                            rate_val = hist_val
+                            should_cache = True
+            except Exception as exc:
+                logger.debug(f"Live FX history lookup failed for {fx_symbol}: {exc}")
+    except Exception as exc:
+        logger.debug(f"Live FX rate lookup failed for {fc}->{tc} ({exc}); using fallback table.")
+
+    if not math.isfinite(rate_val) or rate_val <= 0.0:
+        if fc in _FALLBACK_USD_RATES and tc in _FALLBACK_USD_RATES:
+            rate_val = _FALLBACK_USD_RATES[fc] / _FALLBACK_USD_RATES[tc]
+            should_cache = True
+        else:
+            logger.warning(f"FX pair {fc}->{tc} unavailable live and missing from fallback table; defaulting to 1.0.")
+            rate_val = 1.0
+
+    rate_val = float(rate_val)
+    if should_cache:
+        _FX_RATE_CACHE[cache_key] = rate_val
+    return float(rate_val * mult)
+
+
 def _extract_normalized_peer_multiples(info: dict[str, Any]) -> tuple[float, float, float, float]:
     """Extracts peer valuation multiples and normalizes cross-currency EV distortion."""
     try:
@@ -106,26 +246,48 @@ def _extract_normalized_peer_multiples(info: dict[str, Any]) -> tuple[float, flo
         logger.debug(f"EV/Sales parse error: {exc}")
         ev_sales = 0.0
 
-    if math.isnan(pe):
+    if not math.isfinite(pe):
         pe = 0.0
-    if math.isnan(ev_ebitda):
+    if not math.isfinite(ev_ebitda):
         ev_ebitda = 0.0
-    if math.isnan(pb):
+    if not math.isfinite(pb):
         pb = 0.0
-    if math.isnan(ev_sales):
+    if not math.isfinite(ev_sales):
         ev_sales = 0.0
 
-    price_curr = str(info.get("currency") or "").upper().strip()
-    fin_curr = str(info.get("financialCurrency") or price_curr).upper().strip()
+    price_curr_orig = str(info.get("currency") or "").strip()
+    price_curr = price_curr_orig.upper()
+    fin_curr_orig = str(info.get("financialCurrency") or price_curr_orig).strip()
+    fin_curr = fin_curr_orig.upper()
     symbol = str(info.get("symbol") or "").upper().strip()
     is_in = price_curr == "INR" or symbol.endswith((".NS", ".BO")) or (price_curr == "" and fin_curr == "USD")
 
-    if fin_curr != price_curr:
-        if (fin_curr == "USD" and price_curr in ("INR", "")) or (is_in and ev_ebitda > 150.0):
-            ev_ebitda = ev_ebitda / 86.5
-            ev_sales = ev_sales / 86.5
+    if not price_curr and is_in:
+        price_curr_orig = "INR"
+        price_curr = "INR"
+
+    # Yahoo Finance computes enterpriseValue and marketCap in major GBP/ZAR even when
+    # trading price currency is quoted in sub-units ('GBp'/'ZAc').
+    ev_price_curr = "GBP" if price_curr_orig == "GBp" else ("ZAR" if price_curr_orig == "ZAc" else price_curr_orig)
+    ev_fin_curr = "GBP" if fin_curr_orig == "GBp" else ("ZAR" if fin_curr_orig == "ZAc" else fin_curr_orig)
+
+    if ev_fin_curr and ev_price_curr and ev_fin_curr.upper() != ev_price_curr.upper():
+        peer_fx = _resolve_fx_rate(ev_fin_curr, ev_price_curr)
+        if peer_fx > 1.5 and ev_ebitda > 60.0:
+            ev_ebitda = ev_ebitda / peer_fx
+            ev_sales = ev_sales / peer_fx
+        elif 0.0 < peer_fx < 0.67 and 0.0 < ev_ebitda < 4.0:
+            ev_ebitda = ev_ebitda / peer_fx
+            ev_sales = ev_sales / peer_fx
+        elif ev_ebitda <= 0.0 and ev_sales > 0.0:
+            if peer_fx > 1.5 and ev_sales > 45.0:
+                ev_sales = ev_sales / peer_fx
+            elif 0.0 < peer_fx < 0.25 and ev_sales < 0.25:
+                ev_sales = ev_sales / peer_fx
     elif is_in and ev_ebitda > 150.0:
         ev_ebitda = ev_ebitda / 86.5
+        ev_sales = ev_sales / 86.5
+    elif is_in and ev_ebitda <= 0.0 and ev_sales > 60.0:
         ev_sales = ev_sales / 86.5
 
     return pe, ev_ebitda, pb, ev_sales
@@ -924,8 +1086,18 @@ def parse_yfinance_snapshot(
     Strictly preserves all 2027 CFA Level 1 accounting identities without fabricating synthetic data.
     Raises DataUnavailableError whenever required statements or fundamental financial rows are absent.
     """
-    price = float(info.get("currentPrice") or info.get("regularMarketPrice") or 0.0)
-    if price <= 0.0:
+    raw_price = 0.0
+    for px_key in ("currentPrice", "regularMarketPrice"):
+        val = info.get(px_key)
+        if val is not None:
+            try:
+                cand = float(val)
+                if math.isfinite(cand) and cand > 0.0:
+                    raw_price = cand
+                    break
+            except (ValueError, TypeError) as exc:
+                logger.debug(f"Could not parse {px_key} for {ticker_clean}: {exc}")
+    if not math.isfinite(raw_price) or raw_price <= 0.0:
         raise DataUnavailableError(
             f"Live Yahoo Finance data unavailable for '{ticker_clean}': No valid market price found. "
             "EquiSight does not fabricate synthetic financial data."
@@ -944,66 +1116,62 @@ def parse_yfinance_snapshot(
         )
 
     is_in = ticker_clean.endswith(".NS") or ticker_clean.endswith(".BO")
-    raw_currency = str(info.get("currency") or ("INR" if is_in else "USD")).upper().strip()
-    price_curr = "INR" if (is_in or raw_currency == "INR") else "USD"
-    currency = price_curr
+    raw_currency_orig = str(info.get("currency") or ("INR" if is_in else "USD")).strip()
+    raw_currency = raw_currency_orig.upper()
+    currency = "INR" if (is_in or raw_currency == "INR") else "USD"
     unit_label = "INR Crores" if currency == "INR" else "USD Millions"
     unit_scale = 1e7 if currency == "INR" else 1e6
     benchmark_ticker = "^NSEI" if currency == "INR" else "^GSPC"
     rf = 0.068 if currency == "INR" else 0.042
     erp = 0.060 if currency == "INR" else 0.050
 
-    # Handle cross-currency reporting (e.g. INFY.NS trading in INR but filing in USD, or ADR trading in USD filing in INR)
-    fin_curr = str(info.get("financialCurrency") or price_curr).upper().strip()
-    fx_rate = 1.0
-    if fin_curr != price_curr:
-        try:
-            import yfinance as yf  # type: ignore
-            fx_symbol = f"{fin_curr}{price_curr}=X"
-            fx_info = yf.Ticker(fx_symbol).info or {}
-            rate_val = float(fx_info.get("regularMarketPrice") or fx_info.get("currentPrice") or 0.0)
-            if rate_val <= 0.0:
-                hist_fx = yf.Ticker(fx_symbol).history(period="1d")
-                if not hist_fx.empty and "Close" in hist_fx.columns:
-                    rate_val = float(hist_fx["Close"].iloc[-1])
-            if rate_val > 0.0:
-                fx_rate = rate_val
-            else:
-                FALLBACK_FX = {
-                    ("USD", "INR"): 86.5,
-                    ("INR", "USD"): 1.0 / 86.5,
-                    ("EUR", "USD"): 1.08,
-                    ("USD", "EUR"): 1.0 / 1.08,
-                    ("GBP", "USD"): 1.28,
-                    ("USD", "GBP"): 1.0 / 1.28,
-                    ("JPY", "USD"): 0.0065,
-                    ("CAD", "USD"): 0.72,
-                }
-                fx_rate = FALLBACK_FX.get((fin_curr, price_curr), 86.5 if fin_curr == "USD" and price_curr == "INR" else 1.0)
-        except Exception as exc:
-            logger.debug(f"Live FX rate lookup failed for {fin_curr}->{price_curr} ({exc}); using fallback table.")
-            FALLBACK_FX = {
-                ("USD", "INR"): 86.5,
-                ("INR", "USD"): 1.0 / 86.5,
-                ("EUR", "USD"): 1.08,
-                ("USD", "EUR"): 1.0 / 1.08,
-                ("GBP", "USD"): 1.28,
-                ("USD", "GBP"): 1.0 / 1.28,
-                ("JPY", "USD"): 0.0065,
-                ("CAD", "USD"): 0.72,
-            }
-            fx_rate = FALLBACK_FX.get((fin_curr, price_curr), 86.5 if fin_curr == "USD" and price_curr == "INR" else 1.0)
+    # Universal FX normalization for both trading price and reporting financial statements
+    default_fin_curr = (
+        "GBP" if raw_currency_orig == "GBp"
+        else ("ZAR" if raw_currency_orig == "ZAc" else raw_currency_orig)
+    )
+    fin_curr_orig = str(info.get("financialCurrency") or default_fin_curr).strip()
+    price_fx_rate = _resolve_fx_rate(raw_currency_orig, currency)
+    fx_rate = _resolve_fx_rate(fin_curr_orig, currency)
+
+    price = round(raw_price * price_fx_rate, 2)
+    if price <= 0.0:
+        price = max(0.01, round(raw_price * price_fx_rate, 4))
 
     def _scale_item(raw_val: Optional[float]) -> Optional[float]:
         if raw_val is None:
             return None
         return (raw_val * fx_rate) / unit_scale
 
-    raw_mc = float(info.get("marketCap") or 0.0)
-    raw_shares = float(info.get("sharesOutstanding") or 0.0)
+    raw_mc = 0.0
+    if info.get("marketCap") is not None:
+        try:
+            cand_mc = float(info.get("marketCap"))
+            if math.isfinite(cand_mc) and cand_mc > 0.0:
+                raw_mc = cand_mc
+        except (ValueError, TypeError) as exc:
+            logger.debug(f"Could not parse marketCap for {ticker_clean}: {exc}")
+
+    raw_shares = 0.0
+    for sh_key in ("sharesOutstanding", "impliedSharesOutstanding"):
+        val_sh = info.get(sh_key)
+        if val_sh is not None:
+            try:
+                cand_sh = float(val_sh)
+                if math.isfinite(cand_sh) and cand_sh > 0.0:
+                    raw_shares = cand_sh
+                    break
+            except (ValueError, TypeError) as exc:
+                logger.debug(f"Could not parse {sh_key} for {ticker_clean}: {exc}")
+
+    mc_fx_rate = price_fx_rate
+    if raw_currency_orig in ("GBp", "ZAc") and raw_mc > 0.0 and raw_shares > 0.0:
+        if (raw_mc / (raw_price * raw_shares)) < 0.1:
+            major_curr = "GBP" if raw_currency_orig == "GBp" else "ZAR"
+            mc_fx_rate = _resolve_fx_rate(major_curr, currency)
 
     if raw_mc > 0.0 and price > 0.0:
-        market_cap_scaled = raw_mc / unit_scale
+        market_cap_scaled = (raw_mc * mc_fx_rate) / unit_scale
         shares_outstanding = max(0.01, round(market_cap_scaled / price, 2))
     elif raw_shares > 0.0:
         shares_outstanding = max(0.01, round(raw_shares / unit_scale, 2))
@@ -1265,29 +1433,39 @@ def parse_yfinance_snapshot(
 
     try:
         high_52w = float(info.get("fiftyTwoWeekHigh") or 0.0)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError) as exc:
+        logger.debug(f"Could not parse fiftyTwoWeekHigh for {ticker_clean}: {exc}")
         high_52w = 0.0
-    if math.isnan(high_52w) or high_52w <= 0.0:
+    if not math.isfinite(high_52w) or high_52w <= 0.0:
         high_52w = 0.0
 
     try:
         low_52w = float(info.get("fiftyTwoWeekLow") or 0.0)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError) as exc:
+        logger.debug(f"Could not parse fiftyTwoWeekLow for {ticker_clean}: {exc}")
         low_52w = 0.0
-    if math.isnan(low_52w) or low_52w <= 0.0:
+    if not math.isfinite(low_52w) or low_52w <= 0.0:
         low_52w = 0.0
 
     if high_52w <= 0.0 or low_52w <= 0.0:
         try:
             if not hist_stock.empty and "High" in hist_stock.columns and "Low" in hist_stock.columns:
-                h_val = float(hist_stock["High"].max())
-                l_val = float(hist_stock["Low"].min())
-                if not math.isnan(h_val) and h_val > 0.0:
-                    high_52w = h_val
-                if not math.isnan(l_val) and l_val > 0.0:
-                    low_52w = l_val
+                if high_52w <= 0.0:
+                    h_val = float(hist_stock["High"].max())
+                    if math.isfinite(h_val) and h_val > 0.0:
+                        high_52w = h_val
+                if low_52w <= 0.0:
+                    l_val = float(hist_stock["Low"].min())
+                    if math.isfinite(l_val) and l_val > 0.0:
+                        low_52w = l_val
         except Exception as exc:
             logger.debug(f"Could not retrieve 52-week high/low from history for {ticker_clean}: {exc}")
+
+    if high_52w > 0.0:
+        high_52w = round(high_52w * price_fx_rate, 2)
+    if low_52w > 0.0:
+        low_52w = round(low_52w * price_fx_rate, 2)
+
     if high_52w <= 0.0:
         high_52w = price
     if low_52w <= 0.0:
